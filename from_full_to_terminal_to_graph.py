@@ -149,10 +149,29 @@ def build_aln_scaffold_graph(ctg_alns, components_fn, max_term_dist, terminal_ma
             for i in range(als.num_alns):
                 print(i, als.ref_headers[i], dict_ref_end_connectable['L_end'][i], dict_ref_end_connectable['R_end'][i], als.ref_starts[i], als.ref_ends[i], '\t|\t', als.strands[i], als.query_starts[i], als.query_ends[i])
 
+        pair_left_pos = [(idx, 0, als.query_starts[idx]) for idx in range(als.num_alns)]
+        pair_right_pos = [(idx, 1, als.query_ends[idx]) for idx in range(als.num_alns) ]
+        all_pairs = pair_left_pos + pair_right_pos
+
+        all_pairs.sort(key=lambda x: x[2])
+
+        set_contained = set()
+        largest_right_pos = 0
+        print("--------------------------------"*3)
+        for i in range(als.num_alns):
+            if als.query_ends[i] < largest_right_pos:
+                print("Find contained", i, als.query_headers[i], als.query_ends[i], largest_right_pos)
+                set_contained.add(i)
+            largest_right_pos = max(largest_right_pos, als.query_ends[i])
+        print("--------------------------------"*3)
+
         # Iterate over each alignment for this query sequence
+        #for i in list_traverse:
         for i in range(als.num_alns):
             # Don't connect irrelevant middle alignments
             if not dict_ref_end_connectable['L_end'][i] and not dict_ref_end_connectable['R_end'][i]:
+                continue
+            if i in set_contained:
                 continue
 
             cur_reversed = False
@@ -463,12 +482,12 @@ def parse_ends_paf(paf_file):
     return read_genome_alignments(paf_file)
 
 
-def process_terminals(input_fasta, reference_fasta, full_paf_path, dict_head_end_range, dict_tail_end_range, minimap2_path="minimap2", threads=1):
+def process_terminals(input_fasta, reference_fasta, dict_head_end_range, dict_tail_end_range, output_path, minimap2_path="minimap2", threads=1):
     """
     Orchestrates the extraction, alignment, and parsing of terminal sequences.
     """
-    ends_fasta = input_fasta + ".ends.fa"
-    ends_paf = full_paf_path + ".ends.paf"
+    ends_fasta = output_path + ".ends.fa"
+    ends_paf = output_path + ".ends.paf"
     write_terminal_fasta(input_fasta, ends_fasta, dict_head_end_range, dict_tail_end_range)
     align_terminals_to_reference(ends_fasta, reference_fasta, ends_paf, threads, minimap2_path)
     return parse_ends_paf(ends_paf)
@@ -544,11 +563,18 @@ def filter_boundary_alignments(selected_full, boundary_ratio=0.05):
             )
     return selected_boundary
 
+def generate_relevant_fasta(components_fn, reference_fn, output_path):
+    """
+    Generate the relevant fasta file for patching.
+    """
+    cmd = f"cat {components_fn} {reference_fn} > {output_path}.relevant.fasta"
+    subprocess.run(cmd, shell=True, check=True)
+
 
 def main():
     parser = argparse.ArgumentParser(description='Combine, filter full-length and terminal PAF alignments and build scaffold graph')
     parser.add_argument('-fl', '--full_length', required=True, help='Full length alignment PAF file')
-    parser.add_argument('-f', '--fasta', required=True, help='Components FASTA file')
+    parser.add_argument('-q', '--query', required=True, help='Query FASTA file')
     parser.add_argument('-r', '--reference', required=True, help='Reference FASTA file for terminal alignment')
     parser.add_argument('-o', '--output', help='Output scaffold graph report file')
     parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads [1]')
@@ -562,7 +588,7 @@ def main():
 
     full_len_paf = args.full_length
     output_path = args.output
-    components_fn = args.fasta
+    components_fn = args.query
     reference_fn = args.reference
     threads = args.threads
     TERMINAL_RATIO = args.terminal_ratio
@@ -577,7 +603,7 @@ def main():
     alns_selected_full = filter_high_quality_alns(alns_full_len, minimum_length=MIN_CONTIG_LENGTH, length_ratio=TERMINAL_RATIO, max_min_id_ratio=MAX_MIN_ID_RATIO)
     dict_head_end_range, dict_tail_end_range = select_terminals(alns_selected_full, terminal_ratio=TERMINAL_RATIO, map_lenth=MAP_LENGTH)
     # Generate, align, and parse terminal sequences
-    alns_terminal = process_terminals(components_fn, reference_fn, full_len_paf, dict_head_end_range, dict_tail_end_range, threads=threads)
+    alns_terminal = process_terminals(components_fn, reference_fn, dict_head_end_range, dict_tail_end_range, output_path, threads=threads)
     terminal_matches = map_terminal_to_full(alns_selected_full, alns_terminal)
 
     if DEBUG:
@@ -593,10 +619,11 @@ def main():
     match_psg = aln_psg.max_weight_matching()
     match_psg.write_agp(output_path+'.agp', components_fn, add_suffix_to_unplaced=False)
     if not INFO_ONLY:
+        generate_relevant_fasta(components_fn, reference_fn, output_path)
         cmd = [
             "./ragtag_agp2fa.py",
             output_path + ".agp",
-            components_fn
+            output_path + ".relevant.fasta"
         ]
         run_oae(cmd, output_path + ".fasta", "test.log")
 

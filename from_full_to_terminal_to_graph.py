@@ -160,7 +160,7 @@ def build_aln_scaffold_graph(ctg_alns, components_fn, max_term_dist, terminal_ma
         print("--------------------------------"*3)
         for i in range(als.num_alns):
             if als.query_ends[i] < largest_right_pos:
-                print("Find contained", i, als.query_headers[i], als.query_ends[i], largest_right_pos)
+                print("Find contained", i, als.ref_headers[i], als.query_ends[i], largest_right_pos)
                 set_contained.add(i)
             largest_right_pos = max(largest_right_pos, als.query_ends[i])
         print("--------------------------------"*3)

@@ -861,9 +861,15 @@ class PatchScaffoldGraph:
         used_edges = set()
         obj_header_idx = -1
 
-        agp = AGPFile(agp_fn, "w")
-        agp.add_pragma()
-        agp.add_comment("# AGP created by RagTag {}".format(get_ragtag_version()))
+        # Buffer for scaffold AGP lines: obj_header -> (cur_ref, [lines])
+        scaffold_dict = {}
+
+        # Buffer for unplaced lines: contig -> line
+        unplaced_dict = {}
+
+        # Pragma and comment lines
+        pragma_line = f"## agp-version {get_ragtag_version()}"
+        comment_line = f"# AGP created by RagTag {get_ragtag_version()}"
 
         print("++++++++++++++", sorted(self.edges, key=lambda x: int(x[0].split("_")[-2])))
         while True:
@@ -874,13 +880,11 @@ class PatchScaffoldGraph:
             for u, v in sorted(self.edges, key=lambda x: int(x[0].split("_")[-2])):
                 if (u, v) not in used_edges:
                     u_base = u[:-2]
-
                     u_degree = 0
                     if u_base + "_b" in self.nodes:
                         u_degree += self.graph.degree[u_base + "_b"]
                     if u_base + "_e" in self.nodes:
                         u_degree += self.graph.degree[u_base + "_e"]
-
                     assert u_degree in {2, 4}
 
                     # Check if we have found a starting target sequence
@@ -908,7 +912,19 @@ class PatchScaffoldGraph:
             cur_ref_strand = "+"
             if from_node.endswith("_b"):
                 cur_ref_strand = "-"
-            agp.add_seq_line(obj_header, obj_pos+1, obj_pos+cur_ref_len, obj_pid, "W", cur_ref, 1, cur_ref_len, cur_ref_strand)
+            lines = []
+            # First component line
+            lines.append("\t".join([
+                obj_header,
+                str(obj_pos+1),
+                str(obj_pos+cur_ref_len),
+                str(obj_pid),
+                "W",
+                cur_ref,
+                "1",
+                str(cur_ref_len),
+                cur_ref_strand
+            ]))
             obj_pos += cur_ref_len
             obj_pid += 1
             used_components.add(cur_ref)
@@ -918,19 +934,39 @@ class PatchScaffoldGraph:
             # Process the remaining sequences.
             next_edge_exists = True
             while next_edge_exists:
-                # Process the patch
                 patch_aln = self.graph[from_node][to_node]["alignment"]
                 patch_query = patch_aln.query
                 patch_strand = "+"
                 if patch_aln.strand:
                     patch_strand = "-"
-
                 patch_len = patch_aln.their_query_start - patch_aln.my_query_end
                 if patch_len > 0:
                     if patch_aln.is_gap:
-                        agp.add_gap_line(obj_header, obj_pos+1, obj_pos+patch_len, obj_pid, "N", patch_len, "scaffold", "yes", "align_genus")
+                        # Gap line
+                        lines.append("\t".join([
+                            obj_header,
+                            str(obj_pos+1),
+                            str(obj_pos+patch_len),
+                            str(obj_pid),
+                            "N",
+                            str(patch_len),
+                            "scaffold",
+                            "yes",
+                            "align_genus"
+                        ]))
                     else:
-                        agp.add_seq_line(obj_header, obj_pos+1, obj_pos+patch_len, obj_pid, "W", patch_query, patch_aln.my_query_end+1, patch_aln.their_query_start, patch_strand)
+                        # Sequence line
+                        lines.append("\t".join([
+                            obj_header,
+                            str(obj_pos+1),
+                            str(obj_pos+patch_len),
+                            str(obj_pid),
+                            "W",
+                            patch_query,
+                            str(patch_aln.my_query_end+1),
+                            str(patch_aln.their_query_start),
+                            patch_strand
+                        ]))
                         used_components.add(patch_query)
                     obj_pos += patch_len
                     obj_pid += 1
@@ -942,9 +978,29 @@ class PatchScaffoldGraph:
                 cur_ref_strand = "+"
                 if to_node.endswith("_e"):
                     cur_ref_strand = "-"
-                    agp.add_seq_line(obj_header, obj_pos+1, obj_pos+(cur_ref_len + comp_start), obj_pid, "W", cur_ref, 1, cur_ref_len-(-1*comp_start), cur_ref_strand)
+                    lines.append("\t".join([
+                        obj_header,
+                        str(obj_pos+1),
+                        str(obj_pos+(cur_ref_len + comp_start)),
+                        str(obj_pid),
+                        "W",
+                        cur_ref,
+                        "1",
+                        str(cur_ref_len-(-1*comp_start)),
+                        cur_ref_strand
+                    ]))
                 else:
-                    agp.add_seq_line(obj_header, obj_pos+1, obj_pos+(cur_ref_len + comp_start), obj_pid, "W", cur_ref, 1+(-1*comp_start), cur_ref_len, cur_ref_strand)
+                    lines.append("\t".join([
+                        obj_header,
+                        str(obj_pos+1),
+                        str(obj_pos+(cur_ref_len + comp_start)),
+                        str(obj_pid),
+                        "W",
+                        cur_ref,
+                        str(1+(-1*comp_start)),
+                        str(cur_ref_len),
+                        cur_ref_strand
+                    ]))
                 obj_pos += cur_ref_len + comp_start
                 obj_pid += 1
                 used_components.add(cur_ref)
@@ -953,7 +1009,6 @@ class PatchScaffoldGraph:
                 from_node = to_node[:-2] + "_b"
                 if to_node.endswith("_b"):
                     from_node = to_node[:-2] + "_e"
-
                 if from_node in self.graph.nodes:
                     next_nodes = set(self.graph[from_node])
                     assert len(next_nodes) == 1
@@ -962,14 +1017,15 @@ class PatchScaffoldGraph:
                     used_edges.add((to_node, from_node))
                 else:
                     next_edge_exists = False
-
+            # Store lines for this scaffold
+            scaffold_dict[obj_header] = (lines[0].split("\t")[5], lines)
         # Write unplaced reference sequences
         fai = pysam.FastaFile(ref_fn)
-        all_ref_seqs = set(fai.references)
+        fasta_order = list(fai.references)
         fai.close()
-        remaining_components = all_ref_seqs - used_components
+        remaining_components = set(fasta_order) - used_components
         for c in sorted(remaining_components):
-            agp.add_seq_line(
+            unplaced_dict[c] = "\t".join([
                 c + "_RagTag" * add_suffix_to_unplaced,
                 "1",
                 str(self.component_lens[c]),
@@ -979,6 +1035,17 @@ class PatchScaffoldGraph:
                 "1",
                 str(self.component_lens[c]),
                 "+"
-            )
-
-        agp.write()
+            ])
+        # Write AGP file in reference order
+        with open(agp_fn, "w") as agp_file:
+            agp_file.write(pragma_line + "\n")
+            agp_file.write(comment_line + "\n")
+            for contig in fasta_order:
+                # Write scaffold if this contig is the cur_ref of a scaffold
+                for obj_header, (scf_cur_ref, lines) in scaffold_dict.items():
+                    if scf_cur_ref == contig:
+                        for line in lines:
+                            agp_file.write(line + "\n")
+                # Write unplaced if not scaffolded
+                if contig in unplaced_dict:
+                    agp_file.write(unplaced_dict[contig] + "\n")

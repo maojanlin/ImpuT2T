@@ -26,13 +26,9 @@ def aggregate_edges(input_path, samples):
             print(f"Warning: {sample} not found in {input_path}")
     return edges
 
-def parse_sample_list(list_sample)->list[str]:
-    samples = []
-    with open(list_sample, "r") as f:
-        for line in f:
-            sample = line.strip()
-            samples.append(sample)
-    return samples
+def parse_sample_list(list_sample: str) -> list[str]:
+    with open(list_sample) as f:
+        return [line.strip() for line in f if line.strip()]
 
 def dfs_edge(results, graph, weights, node, visited_contigs, path, score, visited_nodes, depth=0):
     """
@@ -135,12 +131,15 @@ if __name__ == "__main__":
     weights = {}
     nodes = set()
     dict_node_score = defaultdict(list)
+    dict_edge_info = {}
 
     for pair, values in edges_sorted:
         u, v = pair
         w = values[weight_type] # 0 for allele frequency, 1 for max alignment score
         dict_node_score[u].append((w, v))
         dict_node_score[v].append((w, u))
+        dict_edge_info[(u, v)] = values
+        dict_edge_info[(v, u)] = values
 
     filtered_edges = set()
     for node, scores in dict_node_score.items():
@@ -154,8 +153,6 @@ if __name__ == "__main__":
         u, v = pair
         w = values[weight_type] # 0 for allele frequency, 1 for max alignment score
         if (u, v) in filtered_edges or (v, u) in filtered_edges:
-            continue
-        if w < 6000:
             continue
 
         # bidirectional edges
@@ -174,14 +171,8 @@ if __name__ == "__main__":
             graph[node].append(e_node)
             weights[(node, e_node)] = 0
 
-    #print(graph)
-    #print(weights)
-    #print(nodes)
-    #print("--------------------------------"*3)
-    #for node, scores in sorted(dict_node_score.items()):
-    #    print(node, sorted(scores, key=lambda x: -x[0]))
-    #print("--------------------------------"*3)
-
+    
+    # Find the best path and iterate until all contigs are visited
     
     final_results = []
     contigs = set(contig[:-2] for contig in nodes)
@@ -224,4 +215,6 @@ if __name__ == "__main__":
                 break
             print(f"Score: {score}, Path: {path}")
             print(f"Path length: {len(path)}")
+            for idx in range(1, len(path)-1, 2):
+                print(path[idx], path[idx+1], dict_edge_info[(path[idx], path[idx+1])])
             print("---"*20)

@@ -902,7 +902,7 @@ class PatchScaffoldGraph:
 
             # Initialize this object
             obj_header_idx += 1
-            obj_header = "scf" + "{0:08}".format(obj_header_idx)
+            obj_header = "patch" + "{0:08}".format(obj_header_idx)
             obj_pos = 0
             obj_pid = 1
 
@@ -1024,6 +1024,7 @@ class PatchScaffoldGraph:
         fasta_order = list(fai.references)
         fai.close()
         remaining_components = set(fasta_order) - used_components
+        print("++++++++++++++ remaining_components", remaining_components)
         for c in sorted(remaining_components):
             unplaced_dict[c] = "\t".join([
                 c + "_RagTag" * add_suffix_to_unplaced,

@@ -102,6 +102,75 @@ def dfs_node(results, graph, weights, node, visited_contigs, path, score, visite
     visited_nodes.remove(node)
     path.pop()
 
+def find_connection_segments_in_agp(agp_path, start_node, end_node) -> tuple[list[str], bool]:
+    """
+    Extracts AGP lines between start_node and end_node (inclusive) from the AGP file,
+    considering the _b/_e suffix for directionality and both forward and reverse order.
+    """
+    def parse_node(node):
+        if node.endswith('_b'):
+            return node[:-2], 'b'
+        elif node.endswith('_e'):
+            return node[:-2], 'e'
+        else:
+            return node, None
+
+    def check_orientation(strand_s, strand_e, start_end, end_end, flag_forward):
+        print(strand_s, strand_e, start_end, end_end, flag_forward)
+        if flag_forward == False:
+            strand_s *= -1
+            strand_e *= -1
+        
+        if start_end == 'e' and strand_s == 1 or start_end == 'b' and strand_s == -1:
+            start_match = True
+        if end_end == 'b' and strand_e == 1 or end_end == 'e' and strand_e == -1:
+            end_match = True
+        return start_match and end_match
+
+    start_contig, start_end = parse_node(start_node)
+    end_contig, end_end = parse_node(end_node)
+
+    lines = []
+    with open(agp_path) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            fields = line.strip().split("\t")
+            if len(fields) < 6:
+                continue
+            lines.append(line.strip())
+
+    # Find all indices for start and end contigs
+    start_indices = [i for i, l in enumerate(lines) if l.split("\t")[5] == start_contig]
+    end_indices = [i for i, l in enumerate(lines) if l.split("\t")[5] == end_contig]
+
+    if not start_indices or not end_indices:
+        print("No valid node found!!")
+        return [], False
+
+    # Find the closest pair (forward or reverse)
+    candidate_pairs = []
+    for s in start_indices:
+        for e in end_indices:
+            if abs(e - s) <= 2:
+                candidate_pairs.append((s, e))
+
+    if len(candidate_pairs) == 0:
+        print("No valid candidate pairs found!!")
+        return [], False
+
+    for s, e in candidate_pairs:
+        # check if the contigs agree with start_end and end_end
+        strand_s = 1 if lines[s].split("\t")[8] == '+' else -1
+        strand_e = 1 if lines[e].split("\t")[8] == '+' else -1
+        if s <= e: # Forward order
+            if check_orientation(strand_s, strand_e, start_end, end_end, True):
+                return lines[s:e+1], True
+        else: # Reverse order
+            if check_orientation(strand_s, strand_e, start_end, end_end, False):
+                return lines[s:e+1], False
+    print("No valid connection found!!")
+    return [], False
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -216,5 +285,15 @@ if __name__ == "__main__":
             print(f"Score: {score}, Path: {path}")
             print(f"Path length: {len(path)}")
             for idx in range(1, len(path)-1, 2):
-                print(path[idx], path[idx+1], dict_edge_info[(path[idx], path[idx+1])])
+                u, v = path[idx], path[idx+1]
+                edge_info = dict_edge_info[(u, v)]
+                sample = edge_info[2]  # Assuming sample is stored as the third element
+                agp_file = args.path + f"{sample}.agp"
+                print(f"AGP connection for {u} -> {v} in sample {sample}:")
+                segments, flag_forward = find_connection_segments_in_agp(agp_file, u, v)  # Remove _b/_e if needed
+                if flag_forward == False:
+                    segments = list(reversed(segments))
+                for seg in segments:
+                    print(seg)
+                print("---" * 10)
             print("---"*20)

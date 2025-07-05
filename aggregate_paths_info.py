@@ -1,6 +1,8 @@
 import argparse
 import os
 from collections import defaultdict
+from typing import List, Dict
+from combine_connections import read_agp_file, reverse_segments, find_connection_segments, adjust_coordinates, merge_segments
 
 def aggregate_edges(input_path, samples):
     """
@@ -102,6 +104,7 @@ def dfs_node(results, graph, weights, node, visited_contigs, path, score, visite
     visited_nodes.remove(node)
     path.pop()
 
+
 def find_connection_segments_in_agp(agp_path, start_node, end_node) -> tuple[list[str], bool]:
     """
     Extracts AGP lines between start_node and end_node (inclusive) from the AGP file,
@@ -130,19 +133,11 @@ def find_connection_segments_in_agp(agp_path, start_node, end_node) -> tuple[lis
     start_contig, start_end = parse_node(start_node)
     end_contig, end_end = parse_node(end_node)
 
-    lines = []
-    with open(agp_path) as f:
-        for line in f:
-            if line.startswith("#"):
-                continue
-            fields = line.strip().split("\t")
-            if len(fields) < 6:
-                continue
-            lines.append(line.strip())
+    agp_entries = read_agp_file(agp_path)
 
     # Find all indices for start and end contigs
-    start_indices = [i for i, l in enumerate(lines) if l.split("\t")[5] == start_contig]
-    end_indices = [i for i, l in enumerate(lines) if l.split("\t")[5] == end_contig]
+    start_indices = [i for i, l in enumerate(agp_entries) if l['component_id'] == start_contig]
+    end_indices = [i for i, l in enumerate(agp_entries) if l['component_id'] == end_contig]
 
     if not start_indices or not end_indices:
         print("No valid node found!!")
@@ -161,14 +156,14 @@ def find_connection_segments_in_agp(agp_path, start_node, end_node) -> tuple[lis
 
     for s, e in candidate_pairs:
         # check if the contigs agree with start_end and end_end
-        strand_s = 1 if lines[s].split("\t")[8] == '+' else -1
-        strand_e = 1 if lines[e].split("\t")[8] == '+' else -1
+        strand_s = 1 if agp_entries[s]['orientation'] == '+' else -1
+        strand_e = 1 if agp_entries[e]['orientation'] == '+' else -1
         if s <= e: # Forward order
             if check_orientation(strand_s, strand_e, start_end, end_end, True):
-                return lines[s:e+1], True
+                return agp_entries[s:e+1], True
         else: # Reverse order
             if check_orientation(strand_s, strand_e, start_end, end_end, False):
-                return lines[s:e+1], False
+                return agp_entries[s:e+1], False
     print("No valid connection found!!")
     return [], False
 
@@ -179,6 +174,7 @@ if __name__ == "__main__":
     parser.add_argument("-w", "--weight", help="weight type: allele_freq or max_alignment_score [AF|AS]", default="AS")
     #parser.add_argument("-wt", "--weight_threshold", help="weight threshold [AF:5|AS:6000]", type=int)
     parser.add_argument("-wr", "--weight_ratio", help="weight ratio, discard the edge less than ratio of the max weight the same node [0.7]", type=float, default=0.7)
+    parser.add_argument("-o", "--output", help="output path", default="patch.agp")
     args = parser.parse_args()
 
     # Collect edges from all samples
@@ -274,10 +270,12 @@ if __name__ == "__main__":
         print(len(weights_to_process))
         """
     # Show top 3 paths
+    components = []
     for results in final_results:
         top_paths = sorted(results, key=lambda x: -x[0])#[:3]
         len_threshold = len(top_paths[0][1])
         for score, path in top_paths:
+            all_segments = []
             #if len(path) < len_threshold:
             #    break
             if score < top_paths[0][0] * 1:
@@ -291,9 +289,27 @@ if __name__ == "__main__":
                 agp_file = args.path + f"{sample}.agp"
                 print(f"AGP connection for {u} -> {v} in sample {sample}:")
                 segments, flag_forward = find_connection_segments_in_agp(agp_file, u, v)  # Remove _b/_e if needed
-                if flag_forward == False:
-                    segments = list(reversed(segments))
-                for seg in segments:
-                    print(seg)
+                if segments:
+                    updated_segments = merge_segments(all_segments, segments)
+                    if updated_segments:
+                        all_segments = updated_segments
+                    else:
+                        print("Fail to merge segments")
+                        continue
+                #if flag_forward == False:
+                #    segments = list(reversed(segments))
+                #for seg in segments:
+                #    print(seg)
                 print("---" * 10)
-            print("---"*20)
+            for seg in all_segments:
+                print(seg)
+            components.append(all_segments)
+            print("==="*20)
+
+    with open(args.output, 'w') as f:
+        for idx, component in enumerate(components):
+            object = 'patch' + "{0:08}".format(idx)
+            for segment in component:
+                f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"
+                   f"{segment['part_num']}\t{segment['component_type']}\t{segment['component_id']}\t"
+                   f"{segment['component_beg']}\t{segment['component_end']}\t{segment['orientation']}\n")

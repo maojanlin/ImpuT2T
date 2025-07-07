@@ -2,7 +2,7 @@ import argparse
 import os
 from collections import defaultdict
 from typing import List, Dict
-from combine_connections import read_agp_file, reverse_segments, find_connection_segments, adjust_coordinates, merge_segments
+from combine_connections import read_agp_file, merge_segments
 import subprocess
 from ragtag_utilities.utilities import run_oae
 
@@ -71,6 +71,8 @@ class GraphBuilder:
         for pair, values in edges_sorted:
             u, v = pair
             w = values[self.weight_type]
+            if w < 6000:
+                continue
             if (u, v) in filtered_edges or (v, u) in filtered_edges:
                 continue
             # undirected graph assignment
@@ -163,6 +165,7 @@ class AGPAssembler:
                 return node[:-2], 'e'
             else:
                 return node, None
+            
         def check_orientation(strand_s, strand_e, start_end, end_end, flag_forward):
             start_match = end_match = False
             if flag_forward == False:
@@ -173,6 +176,7 @@ class AGPAssembler:
             if (end_end == 'b' and strand_e == 1) or (end_end == 'e' and strand_e == -1):
                 end_match = True
             return start_match and end_match
+        
         start_contig, start_end = parse_node(start_node)
         end_contig, end_end = parse_node(end_node)
         agp_entries = read_agp_file(agp_path)
@@ -280,6 +284,7 @@ def main():
             print(f"Score: {score}, Path: {path}")
             print(f"Path length: {len(path)}")
             all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            print("***********", len(all_segments), len(path), path)
             if args.debug:
                 print('--------------------------------'*3)
                 for seg in all_segments:
@@ -291,6 +296,7 @@ def main():
     with open(args.output + '.agp', 'w') as f:
         for idx, component in enumerate(components):
             object = 'patch' + "{0:08}".format(idx)
+            print(f"idx: {idx}, Object: {object}, component length: {len(component)}")
             for segment in component:
                 f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"
                    f"{segment['part_num']}\t{segment['component_type']}\t{segment['component_id']}\t"

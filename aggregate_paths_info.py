@@ -5,6 +5,7 @@ from typing import List, Dict
 from combine_connections import read_agp_file, merge_segments, reverse_segments
 import subprocess
 from ragtag_utilities.utilities import run_oae
+import pysam
 
 def parse_sample_list(list_sample: str) -> list[str]:
     with open(list_sample) as f:
@@ -40,10 +41,13 @@ class EdgeAggregator:
         return self.edges
 
 class GraphBuilder:
-    def __init__(self, edges, weight_type, weight_ratio):
+    def __init__(self, edges, weight_type, weight_ratio, AS_threshold, AF_threshold, sample_size):
         self.edges = edges
         self.weight_type = weight_type
         self.weight_ratio = weight_ratio
+        self.AS_threshold = AS_threshold
+        self.AF_threshold = AF_threshold
+        self.sample_size = sample_size
         self.graph = defaultdict(list)
         self.weights = {}
         self.nodes = set()
@@ -70,11 +74,15 @@ class GraphBuilder:
 
         for pair, values in edges_sorted:
             u, v = pair
+            AF, AS, _ = values
             w = values[self.weight_type]
-            if w < 6000:
+            if AS < self.AS_threshold: # filtering through AS threshold
+                continue
+            if AF <= self.AF_threshold * self.sample_size * 2: # filtering through AF threshold
                 continue
             if (u, v) in filtered_edges or (v, u) in filtered_edges:
                 continue
+            print("\t", (u, v), values)
             # undirected graph assignment
             self.graph[u].append(v)
             self.graph[v].append(u)
@@ -133,6 +141,18 @@ class PathFinder:
             print(f"{'  ' * depth}dfs_node: node {node} not found in graph, it's an end node")
         visited_nodes.remove(node)
         path.pop()
+
+    def find_end_nodes(self):
+        set_contigs = set([node[:-2] for node in self.nodes])
+        end_nodes = set()
+        for contig in set_contigs:
+            s_node = contig + '_b'
+            e_node = contig + '_e'
+            if s_node not in self.graph:
+                end_nodes.add(s_node)
+            if e_node not in self.graph:
+                end_nodes.add(e_node)
+        return end_nodes
 
     def find_paths(self, edges_sorted):
         final_results = []
@@ -249,6 +269,48 @@ class SequenceCollector:
                     if not content.endswith('\n'):
                         out_f.write('\n')
         return output_path + ".relevant_seq.fasta"
+    
+def output_agp(components, contig_fasta_path, output_path):
+    used_contigs = set()
+    contig_lengths = {}
+    contig_order = []
+    fai = pysam.FastaFile(contig_fasta_path)
+    contig_order = list(fai.references)
+    contig_lengths = {name: fai.get_reference_length(name) for name in contig_order}
+    fai.close()
+    
+    # Create a mapping from first component to component index
+    # Create a list of all items to output, sorted by their first contig's position in FASTA
+    output_items = []
+    component_first_contig = {}
+    for idx, component in enumerate(components):
+        if component:
+            first_contig = component[0]['component_id']
+            output_items.append(('patch', idx, component, first_contig))
+            component_first_contig[first_contig] = idx
+            for segment in component:
+                used_contigs.add(segment['component_id'])
+    
+    # Add unplaced contigs
+    for contig in contig_order:
+        if contig not in used_contigs:
+            output_items.append(('unplaced', contig, None, contig))
+    
+    # Sort by position in FASTA order
+    contig_to_position = {contig: idx for idx, contig in enumerate(contig_order)}
+    output_items.sort(key=lambda x: contig_to_position.get(x[3], float('inf')))
+    
+    with open(output_path + '.agp', 'w') as f:
+        for item_type, item_id, component, first_contig in output_items:
+            if item_type == 'patch':
+                object = 'patch' + "{0:08}".format(item_id)
+                print(f"idx: {item_id}, Object: {object}, component length: {len(component)}")
+                for segment in component:
+                    f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"
+                       f"{segment['part_num']}\t{segment['component_type']}\t{segment['component_id']}\t"
+                       f"{segment['component_beg']}\t{segment['component_end']}\t{segment['orientation']}\n")
+            else:  # unplaced
+                f.write(f"{item_id}\t1\t{contig_lengths[item_id]}\t1\tW\t{item_id}\t1\t{contig_lengths[item_id]}\t+\n")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -256,8 +318,10 @@ def main():
     parser.add_argument("-l", "--list_sample", required=True, help="file containing list of samples")
     parser.add_argument("-w", "--weight", help="weight type: allele_freq or max_alignment_score [AF|AS]", default="AS")
     parser.add_argument("-wr", "--weight_ratio", help="weight ratio, discard the edge less than ratio of the max weight the same node [0.7]", type=float, default=0.7)
+    parser.add_argument("-ast", "--AS_threshold", help="AS threshold, discard the edge less than threshold [6000]", type=int, default=6000)
+    parser.add_argument("-aft", "--AF_threshold", help="AF threshold, discard the edge less than threshold [0.005]", type=float, default=0.005)
     parser.add_argument("--debug", help="debug mode", action="store_true")
-    parser.add_argument("--contig_fasta", help="contig fasta file, only specify if you want the patch fasta output")
+    parser.add_argument("--contig_fasta", required=True, help="contig fasta file, needed for unplaced contigs")
     parser.add_argument("--ref_path", help="reference path, only specify if you want the patch fasta output")
     parser.add_argument("-o", "--output", help="output path", default="patch.result")
     args = parser.parse_args()
@@ -278,7 +342,7 @@ def main():
         for pair, values in sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2])):
             print(pair, values)
 
-    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio)
+    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, len(samples))
     graph, weights, nodes, dict_edge_info = graph_builder.build()
     edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
     print("graph", "--------------------------------"*2)
@@ -287,6 +351,10 @@ def main():
     print("--------------------------------"*2)
 
     path_finder = PathFinder(graph, weights, nodes)
+    end_nodes = path_finder.find_end_nodes()
+    print("================================================"*2)
+    print("End nodes: ", end_nodes)
+    print("================================================"*2)
     final_results = path_finder.find_paths(edges_sorted)
     agp_assembler = AGPAssembler(args.path)
     components = []
@@ -307,22 +375,15 @@ def main():
                     print('\t'.join([str(v) for v in seg.values()]))
             components.append(all_segments)
             print("================================"*3)
-    #for results in final_results:
-    #    top_paths = sorted(results, key=lambda x: -x[0])
-    #    for score, path in top_paths:
-    #        print(f"Score: {score}, Path: {path}")
+    for results in final_results:
+        top_paths = sorted(results, key=lambda x: -x[0])
+        for score, path in top_paths:
+            print(f"Score: {score}, Path: {path}")
 
     # Assemble components into a single AGP file
-    with open(args.output + '.agp', 'w') as f:
-        for idx, component in enumerate(components):
-            object = 'patch' + "{0:08}".format(idx)
-            print(f"idx: {idx}, Object: {object}, component length: {len(component)}")
-            for segment in component:
-                f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"
-                   f"{segment['part_num']}\t{segment['component_type']}\t{segment['component_id']}\t"
-                   f"{segment['component_beg']}\t{segment['component_end']}\t{segment['orientation']}\n")
+    output_agp(components, args.contig_fasta, args.output)
 
-    if args.contig_fasta and args.ref_path:
+    if args.ref_path:
         relevant_samples = set()
         for component in components:
             for segment in component:

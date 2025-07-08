@@ -2,7 +2,7 @@ import argparse
 import os
 from collections import defaultdict
 from typing import List, Dict
-from combine_connections import read_agp_file, merge_segments
+from combine_connections import read_agp_file, merge_segments, reverse_segments
 import subprocess
 from ragtag_utilities.utilities import run_oae
 
@@ -89,6 +89,11 @@ class GraphBuilder:
                 e_node = f"{contig}_e"
                 self.graph[node].append(e_node)
                 self.weights[(node, e_node)] = 0
+            elif node.endswith("_e"):
+                contig = node[:-2]
+                b_node = f"{contig}_b"
+                self.graph[node].append(b_node)
+                self.weights[(node, b_node)] = 0
         return self.graph, self.weights, self.nodes, self.dict_edge_info
 
 class PathFinder:
@@ -140,6 +145,11 @@ class PathFinder:
         while len(nodes - visited_nodes) > 0:
             print("Remaining contigs number: ", len(nodes - visited_nodes))
             start_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_b'
+            start_e_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_e'
+            if start_e_node not in graph_to_process:
+                print("HELLO"*20)
+                start_node = start_e_node
+            #print(start_node, graph_to_process[start_node])
             print("================================================"*2)
             print(f"Starting DFS from {start_node}")
             results = []
@@ -201,7 +211,7 @@ class AGPAssembler:
                     return agp_entries[s:e+1], True
             else:
                 if check_orientation(strand_s, strand_e, start_end, end_end, False):
-                    return agp_entries[s:e+1], False
+                    return agp_entries[e:s+1], False
         print("No valid connection found!!")
         return [], False
 
@@ -215,6 +225,8 @@ class AGPAssembler:
             print(f"AGP connection for {u} -> {v} in sample {sample}:")
             segments, flag_forward = self.find_connection_segments_in_agp(agp_file, u, v)
             if segments:
+                if not flag_forward:
+                    segments = reverse_segments(segments)
                 updated_segments = merge_segments(all_segments, segments)
                 if updated_segments:
                     all_segments = updated_segments
@@ -269,6 +281,10 @@ def main():
     graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio)
     graph, weights, nodes, dict_edge_info = graph_builder.build()
     edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
+    print("graph", "--------------------------------"*2)
+    for ele in graph:
+        print(ele, graph[ele])
+    print("--------------------------------"*2)
 
     path_finder = PathFinder(graph, weights, nodes)
     final_results = path_finder.find_paths(edges_sorted)
@@ -291,6 +307,10 @@ def main():
                     print('\t'.join([str(v) for v in seg.values()]))
             components.append(all_segments)
             print("================================"*3)
+    #for results in final_results:
+    #    top_paths = sorted(results, key=lambda x: -x[0])
+    #    for score, path in top_paths:
+    #        print(f"Score: {score}, Path: {path}")
 
     # Assemble components into a single AGP file
     with open(args.output + '.agp', 'w') as f:

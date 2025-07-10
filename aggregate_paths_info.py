@@ -228,27 +228,37 @@ class PathFinder:
                         print("......"*20, "Final result found!")
                         return final_results
                     else:
-                        new_end_nodes = set(end_nodes) - set_visited_nodes
+                        new_end_nodes = end_nodes - set_visited_nodes
                         #print(f"new_end_nodes: {new_end_nodes}")
                         #print(f"path: {path}")
                         self.search_paths(final_results, current_path + [path], set_visited_contigs, set_visited_nodes, edges_sorted, new_end_nodes, flag_exhaustive)
 
         return final_results
     
-    def standardize_traversals(self, paths):
+    def standardize_traversals(self, paths, end_nodes):
         new_paths = []
         total_score = 0
+        non_end_node_count = 0
+        dangling_contig_count = 0
         for score, path in sorted(paths, key=lambda x: (-x[0], x[1])):
             total_score += score
+            if len(path) <= 2:
+                dangling_contig_count += 1
+            else:
+                if path[-1] not in end_nodes:
+                    non_end_node_count += 1
+                if path[0] not in end_nodes:
+                    non_end_node_count += 1
             # check the orientation of the path
             if int(path[-1].split("_")[-2]) > int(path[0].split("_")[-2]):
                 new_paths.append((score, tuple(path)))
             else:
                 new_paths.append((score, tuple(path[::-1])))
-        return (total_score, tuple(new_paths))                
+        new_paths = sorted(new_paths, key=lambda x: int(x[1][0].split("_")[-2]))
+        return (total_score, non_end_node_count, dangling_contig_count, tuple(new_paths))                
                     
 
-    def find_paths(self, edges_sorted, end_nodes, flag_exhaustive):
+    def find_paths(self, edges_sorted):
         final_results = []
         nodes = self.nodes
         graph_to_process = self.graph.copy()
@@ -452,18 +462,17 @@ def main():
     print("================================================"*2)
     print("End nodes: ", end_nodes)
     print("================================================"*2)
-    sorted_end_nodes = sorted(list(end_nodes), key=lambda x: int(x.split("_")[-2]))
-    test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, sorted_end_nodes, True)
+    test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, end_nodes, True)
     print("TEST_RESULTS", "########################"*2)
     print("TEST_RESULTS", "########################"*2)
     print("TEST_RESULTS", "########################"*2)
     print("TEST_RESULTS", "########################"*2)
     standardized_result = set()
     for ele in test_results:
-        standardized_result.add(path_finder.standardize_traversals(ele))
+        standardized_result.add(path_finder.standardize_traversals(ele, end_nodes))
     for ele in sorted(list(standardized_result), key=lambda x: -x[0]):
         print(ele)
-    final_results = path_finder.find_paths(edges_sorted, end_nodes, False)
+    final_results = path_finder.find_paths(edges_sorted)
     agp_assembler = AGPAssembler(args.path)
     components = []
 

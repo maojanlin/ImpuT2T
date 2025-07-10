@@ -153,13 +153,108 @@ class PathFinder:
             if e_node not in self.graph:
                 end_nodes.add(e_node)
         return end_nodes
+    
+    # ========================= sub-functions for find_paths =========================
+    def give_start_nodes(self, edges_to_process, end_nodes, flag_exhaustive):
+        if len(end_nodes) == 0:
+            start_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_b'
+            start_e_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_e'
+            start_nodes = [start_node, start_e_node]
+        else:
+            if flag_exhaustive == False:
+                start_nodes = sorted(end_nodes, key=lambda x: int(x.split("_")[-2]))[:1]
+            else:
+                start_nodes = sorted(end_nodes, key=lambda x: int(x.split("_")[-2]))
+        return start_nodes
+    
+    def find_candidate_paths(self, results, end_nodes):
+        dict_candidate_paths = defaultdict(list)
+        top_results = sorted(results, key=lambda x: -x[0])
+        max_score = top_results[0][0]
+        for score, path in top_results:
+            terminal_node = path[-1]
+            if terminal_node in end_nodes:
+                dict_candidate_paths[terminal_node].append((score, path))
+            elif score >= max_score:
+                dict_candidate_paths["longest"].append((score, path))
+        dict_trimmed_paths = defaultdict(list)
+        for terminal_node, paths in dict_candidate_paths.items():
+            if terminal_node == "longest":
+                dict_trimmed_paths[terminal_node] = paths
+            else:
+                sorted_paths = sorted(paths, key=lambda x: -x[0])
+                for path in sorted_paths:
+                    if path[0] >= sorted_paths[0][0]:
+                        dict_trimmed_paths[terminal_node].append(path)
+                    else:
+                        break
+        return dict_trimmed_paths
+    # =================================================================================
 
-    def find_paths(self, edges_sorted):
+    def search_paths(self, final_results, current_path, visited_contigs, visited_nodes, edges_sorted, end_nodes, flag_exhaustive):
+        new_edges_sorted = [edge for edge in edges_sorted if edge[0][0] not in visited_nodes and edge[0][1] not in visited_nodes]
+        if len(new_edges_sorted) == 0:
+            final_results.append(current_path)
+            print("......"*20, "Empty edges found!")
+            return final_results
+        start_nodes = self.give_start_nodes(new_edges_sorted, end_nodes, flag_exhaustive)
+        #print(f"visited_nodes: {visited_nodes}")
+        #print(f"[0]: {start_nodes[0]}")
+        if start_nodes[0] in visited_nodes:
+            final_results.append(current_path)
+            print("......"*20, "Duplicate start node found!")
+            return final_results
+        
+        for idx, start_node in enumerate(start_nodes):
+            results = []
+            nodes = self.nodes
+            #print("Remaining contigs number: ", len(nodes - visited_nodes))
+            print(f"Starting DFS from {start_node}")
+            self.dfs_edge(results, start_node, visited_contigs.copy(), [], 0, visited_nodes)
+            # choose the longest path with the highest score or the path stop with end-nodes
+            dict_candidate_paths = self.find_candidate_paths(results, end_nodes)
+            print("--------------------------------------------------"*2)
+            for idy, (terminal_node, paths) in enumerate(dict_candidate_paths.items()):
+                for path in sorted(paths, key=lambda x: -x[0]):
+                    print(idx, idy, terminal_node, path)
+                    contig_in_path = set([node[:-2] for node in path[1]])
+                    set_visited_contigs = visited_contigs.union(contig_in_path)
+                    set_visited_nodes = set()
+                    for visited_contig in set_visited_contigs:
+                        set_visited_nodes.update([visited_contig + '_b', visited_contig + '_e'])
+
+                    if len(nodes - set_visited_nodes) == 0:
+                        final_results.append(current_path + [path])
+                        print("......"*20, "Final result found!")
+                        return final_results
+                    else:
+                        new_end_nodes = set(end_nodes) - set_visited_nodes
+                        #print(f"new_end_nodes: {new_end_nodes}")
+                        #print(f"path: {path}")
+                        self.search_paths(final_results, current_path + [path], set_visited_contigs, set_visited_nodes, edges_sorted, new_end_nodes, flag_exhaustive)
+
+        return final_results
+    
+    def standardize_traversals(self, paths):
+        new_paths = []
+        total_score = 0
+        for score, path in sorted(paths, key=lambda x: (-x[0], x[1])):
+            total_score += score
+            # check the orientation of the path
+            if int(path[-1].split("_")[-2]) > int(path[0].split("_")[-2]):
+                new_paths.append((score, tuple(path)))
+            else:
+                new_paths.append((score, tuple(path[::-1])))
+        return (total_score, tuple(new_paths))                
+                    
+
+    def find_paths(self, edges_sorted, end_nodes, flag_exhaustive):
         final_results = []
         nodes = self.nodes
         graph_to_process = self.graph.copy()
         weights_to_process = self.weights.copy()
         edges_to_process = edges_sorted.copy()
+
         visited_nodes = set()
         visited_contigs = set()
         while len(nodes - visited_nodes) > 0:
@@ -167,7 +262,7 @@ class PathFinder:
             start_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_b'
             start_e_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_e'
             if start_e_node not in graph_to_process:
-                print("HELLO"*20)
+                print("Reverse strand for start node", start_node, "->", start_e_node)
                 start_node = start_e_node
             #print(start_node, graph_to_process[start_node])
             print("================================================"*2)
@@ -182,6 +277,7 @@ class PathFinder:
             graph_to_process = {node: [neighbor for neighbor in graph_to_process[node] if neighbor not in visited_nodes] for node in graph_to_process}
             weights_to_process = {pair: weights_to_process[pair] for pair in weights_to_process if pair[0] not in visited_nodes and pair[1] not in visited_nodes}
         return final_results
+        
 
 class AGPAssembler:
     def __init__(self, agp_dir):
@@ -312,6 +408,7 @@ def output_agp(components, contig_fasta_path, output_path):
             else:  # unplaced
                 f.write(f"{item_id}\t1\t{contig_lengths[item_id]}\t1\tW\t{item_id}\t1\t{contig_lengths[item_id]}\t+\n")
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--path", required=True, help="Input path")
@@ -355,7 +452,18 @@ def main():
     print("================================================"*2)
     print("End nodes: ", end_nodes)
     print("================================================"*2)
-    final_results = path_finder.find_paths(edges_sorted)
+    sorted_end_nodes = sorted(list(end_nodes), key=lambda x: int(x.split("_")[-2]))
+    test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, sorted_end_nodes, True)
+    print("TEST_RESULTS", "########################"*2)
+    print("TEST_RESULTS", "########################"*2)
+    print("TEST_RESULTS", "########################"*2)
+    print("TEST_RESULTS", "########################"*2)
+    standardized_result = set()
+    for ele in test_results:
+        standardized_result.add(path_finder.standardize_traversals(ele))
+    for ele in sorted(list(standardized_result), key=lambda x: -x[0]):
+        print(ele)
+    final_results = path_finder.find_paths(edges_sorted, end_nodes, False)
     agp_assembler = AGPAssembler(args.path)
     components = []
 
@@ -375,10 +483,10 @@ def main():
                     print('\t'.join([str(v) for v in seg.values()]))
             components.append(all_segments)
             print("================================"*3)
-    for results in final_results:
-        top_paths = sorted(results, key=lambda x: -x[0])
-        for score, path in top_paths:
-            print(f"Score: {score}, Path: {path}")
+    #for results in final_results:
+    #    top_paths = sorted(results, key=lambda x: -x[0])
+    #    for score, path in top_paths:
+    #        print(f"Score: {score}, Path: {path}")
 
     # Assemble components into a single AGP file
     output_agp(components, args.contig_fasta, args.output)

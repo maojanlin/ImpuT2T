@@ -60,11 +60,12 @@ def read_agp_file(file_path: str) -> List[Dict]:
 def reverse_segments(segments: List[Dict]) -> List[Dict]:
     """Reverse the segments."""
     reversed_segments = []
+    max_position = max(segment['object_end'] for segment in segments)
     for segment in segments[::-1]:
         reversed_segments.append({
             'object': segment['object'],
-            'object_beg': segment['object_beg'],
-            'object_end': segment['object_end'],
+            'object_beg': max_position - segment['object_end'] + 1,
+            'object_end': max_position - segment['object_beg'] + 1,
             'orientation': '+' if segment['orientation'] == '-' else '-',
             'part_num': segment['part_num'],
             'component_type': segment['component_type'],

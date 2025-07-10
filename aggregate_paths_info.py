@@ -477,48 +477,35 @@ def main():
     
     components = []
     agp_assembler = AGPAssembler(args.path)
-    for total_score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result:
-        for score, path in paths:
-            print(f"Total Score: {total_score}, Score: {score}, Path: {path}")
-            print(f"Path length: {len(path)}")
-            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
-            print("***********", len(all_segments), len(path), path)
-            if args.debug:
-                print('--------------------------------'*3)
-                for seg in all_segments:
-                    print('\t'.join([str(v) for v in seg.values()]))
-            components.append(all_segments)
-        break
-    
-    """
-    final_results = path_finder.find_paths(edges_sorted)
-    agp_assembler = AGPAssembler(args.path)
-    components = []
-    
-    for results in final_results:
-        top_paths = sorted(results, key=lambda x: -x[0])
-        len_threshold = len(top_paths[0][1])
-        for score, path in top_paths:
-            if score < top_paths[0][0] * 1:
-                break
-            print(f"Score: {score}, Path: {path}")
-            print(f"Path length: {len(path)}")
-            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
-            print("***********", len(all_segments), len(path), path)
-            if args.debug:
-                print('--------------------------------'*3)
-                for seg in all_segments:
-                    print('\t'.join([str(v) for v in seg.values()]))
-            components.append(all_segments)
-            print("================================"*3)
-    """
-    #for results in final_results:
-    #    top_paths = sorted(results, key=lambda x: -x[0])
-    #    for score, path in top_paths:
-    #        print(f"Score: {score}, Path: {path}")
+    total_score_1st, non_end_node_count_1st, dangling_contig_count_1st, paths = sorted_standardized_result[0]
+    for score, path in paths:
+        print(f"Total Score: {total_score_1st}, Score: {score}, Path: {path}")
+        print(f"Path length: {len(path)}")
+        all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+        print("***********", len(all_segments), len(path), path)
+        if args.debug:
+            print('--------------------------------'*3)
+            for seg in all_segments:
+                print('\t'.join([str(v) for v in seg.values()]))
+        components.append(all_segments)
+    # get the alternative components if other components has higher score, lower number of non-end nodes or dangling contigs
+    alt_components = []
+    for total_score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result[1:]:
+        alt_component = []
+        if total_score >= total_score_1st or non_end_node_count < non_end_node_count_1st or dangling_contig_count < dangling_contig_count_1st:
+            print("Alternative component found!")
+            for score, path in paths:
+                print(f"Total Score: {total_score}, Score: {score}, Path: {path}")
+                print(f"Path length: {len(path)}")
+                all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+                print("***********", len(all_segments), len(path), path)
+                alt_component.append(all_segments)
+        alt_components.append(alt_component)
 
     # Assemble components into a single AGP file
     output_agp(components, args.contig_fasta, args.output)
+    for idx, alt_component in enumerate(alt_components):
+        output_agp(alt_component, args.contig_fasta, args.output + f".alt_{idx}.agp")
 
     if args.ref_path:
         relevant_samples = set()

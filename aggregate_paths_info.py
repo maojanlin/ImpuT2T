@@ -470,12 +470,31 @@ def main():
     standardized_result = set()
     for ele in test_results:
         standardized_result.add(path_finder.standardize_traversals(ele, end_nodes))
-    for ele in sorted(list(standardized_result), key=lambda x: -x[0]):
+    sorted_standardized_result = sorted(list(standardized_result), key=lambda x: -x[0])
+    for ele in sorted_standardized_result:
         print(ele)
+    
+    
+    components = []
+    agp_assembler = AGPAssembler(args.path)
+    for total_score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result:
+        for score, path in paths:
+            print(f"Total Score: {total_score}, Score: {score}, Path: {path}")
+            print(f"Path length: {len(path)}")
+            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            print("***********", len(all_segments), len(path), path)
+            if args.debug:
+                print('--------------------------------'*3)
+                for seg in all_segments:
+                    print('\t'.join([str(v) for v in seg.values()]))
+            components.append(all_segments)
+        break
+    
+    """
     final_results = path_finder.find_paths(edges_sorted)
     agp_assembler = AGPAssembler(args.path)
     components = []
-
+    
     for results in final_results:
         top_paths = sorted(results, key=lambda x: -x[0])
         len_threshold = len(top_paths[0][1])
@@ -492,6 +511,7 @@ def main():
                     print('\t'.join([str(v) for v in seg.values()]))
             components.append(all_segments)
             print("================================"*3)
+    """
     #for results in final_results:
     #    top_paths = sorted(results, key=lambda x: -x[0])
     #    for score, path in top_paths:

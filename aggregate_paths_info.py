@@ -193,10 +193,10 @@ class PathFinder:
 
     def search_paths(self, final_results, current_path, visited_contigs, visited_nodes, edges_sorted, end_nodes, flag_exhaustive):
         new_edges_sorted = [edge for edge in edges_sorted if edge[0][0] not in visited_nodes and edge[0][1] not in visited_nodes]
-        if len(new_edges_sorted) == 0:
-            final_results.append(current_path)
-            print("......"*20, "Empty edges found!")
-            return final_results
+        #if len(new_edges_sorted) == 0:
+        #    final_results.append(current_path)
+        #    print("......"*20, "Empty edges found!")
+        #    return final_results
         start_nodes = self.give_start_nodes(new_edges_sorted, end_nodes, flag_exhaustive)
         #print(f"visited_nodes: {visited_nodes}")
         #print(f"[0]: {start_nodes[0]}")
@@ -213,10 +213,14 @@ class PathFinder:
             self.dfs_edge(results, start_node, visited_contigs.copy(), [], 0, visited_nodes)
             # choose the longest path with the highest score or the path stop with end-nodes
             dict_candidate_paths = self.find_candidate_paths(results, end_nodes)
+            for terminal_node, paths in dict_candidate_paths.items():
+                print(f"terminal_node: {terminal_node}")
+                for path in paths:
+                    print(f"path: {path}")
             print("--------------------------------------------------"*2)
             for idy, (terminal_node, paths) in enumerate(dict_candidate_paths.items()):
-                for path in sorted(paths, key=lambda x: -x[0]):
-                    print(idx, idy, terminal_node, path)
+                for idz, path in enumerate(sorted(paths, key=lambda x: -x[0])):
+                    print(idx, idy, idz, terminal_node, path)
                     contig_in_path = set([node[:-2] for node in path[1]])
                     set_visited_contigs = visited_contigs.union(contig_in_path)
                     set_visited_nodes = set()
@@ -226,7 +230,7 @@ class PathFinder:
                     if len(nodes - set_visited_nodes) == 0:
                         final_results.append(current_path + [path])
                         print("......"*20, "Final result found!")
-                        return final_results
+                        #return final_results
                     else:
                         new_end_nodes = end_nodes - set_visited_nodes
                         #print(f"new_end_nodes: {new_end_nodes}")
@@ -389,13 +393,15 @@ def output_agp(components, contig_fasta_path, output_path):
     # Create a list of all items to output, sorted by their first contig's position in FASTA
     output_items = []
     component_first_contig = {}
-    for idx, component in enumerate(components):
+    component_idx = 0
+    for component in components:
         if component:
             first_contig = component[0]['component_id']
-            output_items.append(('patch', idx, component, first_contig))
-            component_first_contig[first_contig] = idx
+            output_items.append(('patch', component_idx, component, first_contig))
+            component_first_contig[first_contig] = component_idx
             for segment in component:
                 used_contigs.add(segment['component_id'])
+            component_idx += 1
     
     # Add unplaced contigs
     for contig in contig_order:
@@ -500,12 +506,13 @@ def main():
                 all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
                 print("***********", len(all_segments), len(path), path)
                 alt_component.append(all_segments)
-        alt_components.append(alt_component)
+        if alt_component:
+            alt_components.append(alt_component)
 
     # Assemble components into a single AGP file
     output_agp(components, args.contig_fasta, args.output)
     for idx, alt_component in enumerate(alt_components):
-        output_agp(alt_component, args.contig_fasta, args.output + f".alt_{idx}.agp")
+        output_agp(alt_component, args.contig_fasta, args.output + f".alt_{idx}")
 
     if args.ref_path:
         relevant_samples = set()

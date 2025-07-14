@@ -1,10 +1,8 @@
 import argparse
 import os
 from collections import defaultdict
-from typing import List, Dict
 from combine_connections import read_agp_file, merge_segments, reverse_segments
-import subprocess
-from ragtag_utilities.utilities import run_oae
+from ragtag_utilities.utilities import run_oae, get_ragtag_version, get_impuT2T_version
 import pysam
 
 def parse_sample_list(list_sample: str) -> list[str]:
@@ -381,6 +379,9 @@ class SequenceCollector:
         return output_path + ".relevant_seq.fasta"
     
 def output_agp(components, contig_fasta_path, output_path):
+    pragma_line = f"## agp-version {get_ragtag_version()}"
+    comment_line = f"# AGP created by RagTag {get_ragtag_version()}"
+
     used_contigs = set()
     contig_lengths = {}
     contig_order = []
@@ -413,6 +414,8 @@ def output_agp(components, contig_fasta_path, output_path):
     output_items.sort(key=lambda x: contig_to_position.get(x[3], float('inf')))
     
     with open(output_path + '.agp', 'w') as f:
+        f.write(pragma_line + '\n')
+        f.write(comment_line + '\n')
         for item_type, item_id, component, first_contig in output_items:
             if item_type == 'patch':
                 object = 'patch' + "{0:08}".format(item_id)
@@ -426,7 +429,7 @@ def output_agp(components, contig_fasta_path, output_path):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser("impuT2T patching version: " + get_impuT2T_version())
     parser.add_argument("-p", "--path", required=True, help="Input path")
     parser.add_argument("-l", "--list_sample", required=True, help="file containing list of samples")
     parser.add_argument("-w", "--weight", help="weight type: allele_freq or max_alignment_score [AF|AS]", default="AS")

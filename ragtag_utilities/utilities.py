@@ -22,6 +22,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Modified by Mao-Jan Lin in 2025 <mj.maojanlin@gmail.com> for the impuT2T patching project
 """
 
 import subprocess
@@ -38,6 +40,8 @@ complements = str.maketrans("ACGTNURYSWKMBVDHacgtnuryswkmbvdh", "TGCANAYRSWMKVBH
 def get_ragtag_version():
     return 'v2.1.0'
 
+def get_impuT2T_version():
+    return 'v0.0.1'
 
 def reverse_complement(seq):
     """

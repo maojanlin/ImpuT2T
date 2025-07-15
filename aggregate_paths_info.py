@@ -51,6 +51,7 @@ class GraphBuilder:
         self.nodes = set()
         self.dict_node_score = defaultdict(list)
         self.dict_edge_info = {}
+        self.filtered_edges = set()
 
     def build(self):
         edges_sorted = sorted(self.edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
@@ -62,13 +63,12 @@ class GraphBuilder:
             self.dict_edge_info[(u, v)] = values
             self.dict_edge_info[(v, u)] = values
 
-        filtered_edges = set()
         for node, scores in self.dict_node_score.items():
             max_score = max(scores, key=lambda x: x[0])[0]
             for score, neighbor in scores:
                 if score < max_score * self.weight_ratio:
-                    filtered_edges.add((node, neighbor))
-                    filtered_edges.add((neighbor, node))
+                    self.filtered_edges.add((node, neighbor))
+                    self.filtered_edges.add((neighbor, node))
 
         for pair, values in edges_sorted:
             u, v = pair
@@ -78,7 +78,7 @@ class GraphBuilder:
                 continue
             if AF <= self.AF_threshold * self.sample_size * 2: # filtering through AF threshold
                 continue
-            if (u, v) in filtered_edges or (v, u) in filtered_edges:
+            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges:
                 continue
             print("\t", (u, v), values)
             # undirected graph assignment
@@ -257,7 +257,34 @@ class PathFinder:
             else:
                 new_paths.append((score, tuple(path[::-1])))
         new_paths = sorted(new_paths, key=lambda x: int(x[1][0].split("_")[-2]))
-        return (total_score, non_end_node_count, dangling_contig_count, tuple(new_paths))                
+        return (total_score, non_end_node_count, dangling_contig_count, tuple(new_paths))
+
+    def second_pass_connection(self, sorted_standardized_result, filtered_edges):
+        print("filtered_edges: ", filtered_edges)
+        for score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result:
+            end_nodes = []
+            for path_info in paths:
+                score, path = path_info
+                end_nodes.append((path[0], path[-1]))
+
+            possible_connections = set()
+            for idx, (end_node_b, end_node_e) in enumerate(end_nodes):
+                for idj in range(idx+1, len(end_nodes)):
+                    (end_node_b_2, end_node_e_2) = end_nodes[idj]
+                    if end_node_b not in (end_node_b_2, end_node_e_2) and end_node_e not in (end_node_b_2, end_node_e_2):
+                        #possible_connections.add((end_node_b, end_node_b_2))
+                        #possible_connections.add((end_node_b, end_node_e_2))
+                        #possible_connections.add((end_node_e, end_node_e_2))
+                        if (end_node_e, end_node_b_2) in filtered_edges:
+                            possible_connections.add((idx, idj, (end_node_e, end_node_b_2)))
+            updated_paths = []
+            for idx, idj, (end_node_b, end_node_e) in possible_connections:
+                updated_paths.append(paths[idx][1] + [(end_node_b, end_node_e)] + paths[idj][1])
+            print("Updated paths: ", updated_paths)
+            print("Candidate connections: ", possible_connections)
+            print("--------------------------------"*2)
+        return
+
                     
 
     def find_paths(self, edges_sorted):
@@ -439,6 +466,7 @@ def main():
     parser.add_argument("--debug", help="debug mode", action="store_true")
     parser.add_argument("--contig_fasta", required=True, help="contig fasta file, needed for unplaced contigs")
     parser.add_argument("--ref_path", help="reference path, only specify if you want the patch fasta output")
+    parser.add_argument("--second_pass", help="second pass connection", action="store_true")
     parser.add_argument("-o", "--output", help="output path", default="patch.result")
     args = parser.parse_args()
 
@@ -483,6 +511,11 @@ def main():
     for ele in sorted_standardized_result:
         print(ele)
     
+    if args.second_pass:
+        print("Try connecting with filtered connections in the first pass")
+        second_pass_results = path_finder.second_pass_connection(sorted_standardized_result, graph_builder.filtered_edges)
+        print("SECOND_PASS_RESULTS", "########################"*2)
+        print("SECOND_PASS_RESULTS", "########################"*2)
     
     components = []
     agp_assembler = AGPAssembler(args.path)

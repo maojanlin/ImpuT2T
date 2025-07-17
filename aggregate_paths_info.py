@@ -75,10 +75,16 @@ class GraphBuilder:
             AF, AS, _ = values
             w = values[self.weight_type]
             if AS < self.AS_threshold: # filtering through AS threshold
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
                 continue
             if AF <= self.AF_threshold * self.sample_size * 2: # filtering through AF threshold
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
                 continue
             if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges:
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
                 continue
             print("\t", (u, v), values)
             # undirected graph assignment
@@ -259,12 +265,60 @@ class PathFinder:
         new_paths = sorted(new_paths, key=lambda x: int(x[1][0].split("_")[-2]))
         return (total_score, non_end_node_count, dangling_contig_count, tuple(new_paths))
 
+    def second_pass_merge(self, paths, possible_connections):
+        # Build mapping from end nodes to component indices
+        end_to_idx = {}
+        for idx, path in enumerate(paths):
+            end_to_idx[path[1][0]] = idx  # start
+            end_to_idx[path[1][-1]] = idx  # end
+
+        # Build adjacency list for connections
+        adj = defaultdict(list)
+        in_degree = defaultdict(int)
+        for idx, idj, (from_node, to_node) in possible_connections:
+            adj[idx].append((idj, from_node, to_node))
+            in_degree[idj] += 1
+
+        # Find starting components (those not pointed to by any connection)
+        start_indices = [i for i in range(len(paths)) if in_degree[i] == 0]
+
+        merged_paths = []
+        merged_indices = []
+        visited = set()
+
+        for start in start_indices:
+            if start in visited:
+                continue
+            current = start
+            merged = list(paths[current][1])
+            component_indices = [current]
+            visited.add(current)
+            while adj[current]:
+                next_idx, from_node, to_node = adj[current][0]  # assuming only one connection for simplicity
+                # Insert the connecting edge
+                merged.extend(paths[next_idx][1])
+                component_indices.append(next_idx)
+                visited.add(next_idx)
+                current = next_idx
+            merged_paths.append(tuple(merged))
+            merged_indices.append(tuple(component_indices))
+
+        # Add any unvisited components (not connected to anything)
+        for i in range(len(paths)):
+            if i not in visited:
+                merged_paths.append(paths[i][1])
+                merged_indices.append((i,))
+
+        return merged_indices, merged_paths
+
+
     def second_pass_connection(self, sorted_standardized_result, filtered_edges):
-        print("filtered_edges: ", filtered_edges)
+        #print("filtered_edges: ", sorted(filtered_edges))
+        second_pass_result = []
         for score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result:
             end_nodes = []
             for path_info in paths:
-                score, path = path_info
+                _, path = path_info
                 end_nodes.append((path[0], path[-1]))
 
             possible_connections = set()
@@ -277,13 +331,21 @@ class PathFinder:
                         #possible_connections.add((end_node_e, end_node_e_2))
                         if (end_node_e, end_node_b_2) in filtered_edges:
                             possible_connections.add((idx, idj, (end_node_e, end_node_b_2)))
-            updated_paths = []
-            for idx, idj, (end_node_b, end_node_e) in possible_connections:
-                updated_paths.append(paths[idx][1] + [(end_node_b, end_node_e)] + paths[idj][1])
-            print("Updated paths: ", updated_paths)
-            print("Candidate connections: ", possible_connections)
-            print("--------------------------------"*2)
-        return
+            
+            merged_indices, merged_paths = self.second_pass_merge(paths, possible_connections)
+            #print("Merged paths: ", merged_paths)
+            #print("Candidate connections: ", possible_connections)
+            #print("--------------------------------"*2)
+            new_dangling_contig_count = 0
+            for new_path in merged_paths:
+                if len(new_path) <= 2:
+                    new_dangling_contig_count += 1
+            new_paths = []
+            for idx, path in enumerate(merged_paths):
+                new_score = sum(paths[idy][0] for idy in merged_indices[idx])
+                new_paths.append((new_score, tuple(path)))
+            second_pass_result.append((score, non_end_node_count, new_dangling_contig_count, tuple(new_paths)))
+        return second_pass_result
 
                     
 
@@ -407,7 +469,7 @@ class SequenceCollector:
     
 def output_agp(components, contig_fasta_path, output_path):
     pragma_line = f"## agp-version {get_ragtag_version()}"
-    comment_line = f"# AGP created by RagTag {get_ragtag_version()}"
+    comment_line = f"# AGP created by impuT2T {get_impuT2T_version()}"
 
     used_contigs = set()
     contig_lengths = {}
@@ -516,6 +578,9 @@ def main():
         second_pass_results = path_finder.second_pass_connection(sorted_standardized_result, graph_builder.filtered_edges)
         print("SECOND_PASS_RESULTS", "########################"*2)
         print("SECOND_PASS_RESULTS", "########################"*2)
+        for ele in second_pass_results:
+            print(ele)
+        sorted_standardized_result = second_pass_results
     
     components = []
     agp_assembler = AGPAssembler(args.path)

@@ -273,7 +273,7 @@ def build_aln_scaffold_graph(ctg_alns, components_fn, max_term_dist, terminal_ma
                                 0,  # Always on the query's forward strand
                                 is_gap=False
                             )
-                            sg.add_edge(u, v, alignment, pair_score)
+                            sg.add_edge(u, v, alignment, pair_score, -overlap)
             if debug:
                 print("!!!!!!!!!!!!!!!!!!!!!! RESET!")
             last = i
@@ -399,7 +399,7 @@ def reverse_alignments(alns):
 def output_graph_info(graph, output_path):
     with open(output_path, "w") as f:
         for u, v in graph.edges:
-            f.write("\t".join([u,v, str(graph[u][v]["score"]), "\n"]))
+            f.write("\t".join([u,v, str(graph[u][v]["score"]), str(graph[u][v]["dist"]), "\n"]))
 
 
 def select_terminals(alns_selected_full, terminal_ratio=0.05, map_lenth=5000):

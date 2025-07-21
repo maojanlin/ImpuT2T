@@ -729,7 +729,7 @@ class PatchScaffoldGraph:
     def neighbors(self, n):
         return self.graph.neighbors(n)
 
-    def add_edge(self, u, v, aln, score=0):
+    def add_edge(self, u, v, aln, score=0, dist=0):
         """
         :param u: from
         :param v: to
@@ -746,15 +746,17 @@ class PatchScaffoldGraph:
                 self.graph[u][v]["weight"] += 1
                 self.graph[u][v]["alignment"] = aln
                 self.graph[u][v]["score"] = score
+                self.graph[u][v]["dist"] = dist
 
                 self.graph[v][u]["weight"] += 1
                 self.graph[v][u]["alignment"] = aln.reverse()
                 self.graph[v][u]["score"] = score
+                self.graph[v][u]["dist"] = dist
             else:
                 self.graph[u][v]["weight"] += 1
         else:
-            self.graph.add_edge(u, v, weight=1, alignment=aln, score=score)
-            self.graph.add_edge(v, u, weight=1, alignment=aln.reverse(), score=score)
+            self.graph.add_edge(u, v, weight=1, alignment=aln, score=score, dist=dist)
+            self.graph.add_edge(v, u, weight=1, alignment=aln.reverse(), score=score, dist=dist)
 
     def remove_edge(self, u, v):
         self.graph.remove_edge(u, v)
@@ -804,7 +806,7 @@ class PatchScaffoldGraph:
         G = nx.DiGraph()
         for u, v in self.edges:
             if self.graph[u][v]["weight"] <= w:
-                G.add_edge(u, v, weight=self.graph[u][v]["weight"], alignment=self.graph[u][v]["alignment"], score=self.graph[u][v]["score"])
+                G.add_edge(u, v, weight=self.graph[u][v]["weight"], alignment=self.graph[u][v]["alignment"], score=self.graph[u][v]["score"], dist=self.graph[u][v]["dist"])
         self.graph = G
 
     def max_weight_matching(self):
@@ -815,7 +817,7 @@ class PatchScaffoldGraph:
         undirected_sg = nx.Graph()
         for u, v in self.edges:
             #undirected_sg.add_edge(u, v, weight=self.graph[u][v]["weight"], score=self.graph[u][v]["score"])
-            undirected_sg.add_edge(u, v, weight=self.graph[u][v]["score"])
+            undirected_sg.add_edge(u, v, weight=self.graph[u][v]["score"], dist=self.graph[u][v]["dist"])
         matching = nx.max_weight_matching(G=undirected_sg)
 
         # Remove any cycles that would result from adding intra-sequence edges
@@ -845,8 +847,8 @@ class PatchScaffoldGraph:
         new_psg = PatchScaffoldGraph(self.components_fn)
         for u, v in matching:
             if (u, v) not in edges_to_delete and (v, u) not in edges_to_delete:
-                new_psg.add_edge(u, v, self.graph[u][v]["alignment"], self.graph[u][v]["score"])
-                new_psg.add_edge(v, u, self.graph[v][u]["alignment"], self.graph[v][u]["score"])
+                new_psg.add_edge(u, v, self.graph[u][v]["alignment"], self.graph[u][v]["score"], self.graph[u][v]["dist"])
+                new_psg.add_edge(v, u, self.graph[v][u]["alignment"], self.graph[v][u]["score"], self.graph[v][u]["dist"])
 
         return new_psg
 

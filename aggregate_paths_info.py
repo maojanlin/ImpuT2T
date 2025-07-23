@@ -4,16 +4,36 @@ from collections import defaultdict
 from combine_connections import read_agp_file, merge_segments, reverse_segments
 from ragtag_utilities.utilities import run_oae, get_ragtag_version, get_impuT2T_version
 import pysam
+import numpy as np
+from sklearn.mixture import GaussianMixture
 
 def parse_sample_list(list_sample: str) -> list[str]:
     with open(list_sample) as f:
         return [line.strip() for line in f if line.strip()]
 
 class EdgeAggregator:
-    def __init__(self, input_path: str, samples: list[str]):
+    def __init__(self, input_path: str, samples: list[str], gmm: bool):
         self.input_path = input_path
         self.samples = samples
+        self.gmm = gmm
+        self.raw_edges = {}
         self.edges = {}
+
+    def fit_gmm(self, x, max_components=10, cutoff=0.1):
+        bics = []
+        models = []
+        x = x.reshape(-1, 1)
+        for k in range(1, max_components + 1):
+            gmm = GaussianMixture(n_components=k, covariance_type='full').fit(x)
+            weights = gmm.weights_
+            significant_components = weights > cutoff
+            if significant_components.sum() < len(significant_components):
+                break
+            bics.append(gmm.bic(x))
+            models.append(gmm)
+        best_k = np.argmin(bics)
+        best_model = models[best_k]
+        return best_model, best_k+1
 
     def aggregate(self):
         """
@@ -25,17 +45,51 @@ class EdgeAggregator:
             if os.path.exists(self.input_path + sample + ".info"):
                 with open(self.input_path + sample + ".info", "r") as f:
                     for line in f.readlines():
-                        u, v, score = line.strip().split("\t")
+                        u, v, score, dist = line.strip().split("\t")
                         pair = tuple(sorted([u, v]))
-                        if pair not in self.edges:
-                            self.edges[pair] = [1, int(score), sample]
+                        if pair not in self.raw_edges:
+                            self.raw_edges[pair] = [[sample], [(int(score), int(dist))]]
                         else:
-                            if int(score) > self.edges[pair][1]:
-                                self.edges[pair] = [self.edges[pair][0] + 1, int(score), sample]
-                            else:
-                                self.edges[pair][0] += 1
+                            self.raw_edges[pair][0].append(sample)
+                            self.raw_edges[pair][1].append((int(score), int(dist)))
             else:
                 print(f"Warning: {sample} not found in {self.input_path}")
+        if self.gmm:
+            for pair, info in self.raw_edges.items():
+                scores = [s for s, d in info[1]]
+                dists = [d for s, d in info[1]]
+                relevant_samples = info[0]
+                if len(info[0]) > 10:
+                    gmm, best_k = self.fit_gmm(np.array(dists))
+                    means = gmm.means_.flatten()
+                    stds = np.sqrt(gmm.covariances_.flatten())  # for 1D case
+                    print(f"================================== Best k: {best_k} ==================================")
+                    print(f"GMM means: {means}, stds: {stds}")
+                    gmm_scores = []
+                    gmm_samples = []
+                    for mean, std in zip(means, stds):
+                        candidate_dists = []
+                        candidate_scores = []
+                        candidate_samples = []
+                        for idx in range(len(dists)):
+                            if dists[idx] <= mean + std and dists[idx] >= mean - std and relevant_samples[idx] != "HG002.2":
+                                candidate_dists.append(dists[idx])
+                                candidate_scores.append(scores[idx])
+                                candidate_samples.append(relevant_samples[idx])
+                        if len(candidate_dists) > 0:
+                            best_close_idx = np.argmax(candidate_scores)
+                            gmm_scores.append(candidate_scores[best_close_idx])
+                            gmm_samples.append(candidate_samples[best_close_idx])
+                    final_selected_idx = np.argmax(gmm_scores)
+                    self.edges[pair] = [len(info[0]), gmm_scores[final_selected_idx], gmm_samples[final_selected_idx]]
+                else:
+                    idx = np.argmax(scores)
+                    self.edges[pair] = [len(info[0]), scores[idx], relevant_samples[idx]]
+        else:
+            for pair, info in self.raw_edges.items():
+                idx = np.argmax(info[1], key=lambda x: x[0])
+                self.edges[pair] = [len(info[0]), info[1][idx][0], info[0][idx]]
+
         return self.edges
 
 class GraphBuilder:
@@ -313,7 +367,7 @@ class PathFinder:
 
 
     def second_pass_connection(self, sorted_standardized_result, filtered_edges):
-        #print("filtered_edges: ", sorted(filtered_edges))
+        print("filtered_edges: ", sorted(filtered_edges))
         second_pass_result = []
         for score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result:
             end_nodes = []
@@ -333,9 +387,9 @@ class PathFinder:
                             possible_connections.add((idx, idj, (end_node_e, end_node_b_2)))
             
             merged_indices, merged_paths = self.second_pass_merge(paths, possible_connections)
-            #print("Merged paths: ", merged_paths)
-            #print("Candidate connections: ", possible_connections)
-            #print("--------------------------------"*2)
+            print("Merged paths: ", merged_paths)
+            print("Candidate connections: ", possible_connections)
+            print("--------------------------------"*2)
             new_dangling_contig_count = 0
             for new_path in merged_paths:
                 if len(new_path) <= 2:
@@ -529,6 +583,7 @@ def main():
     parser.add_argument("--contig_fasta", required=True, help="contig fasta file, needed for unplaced contigs")
     parser.add_argument("--ref_path", help="reference path, only specify if you want the patch fasta output")
     parser.add_argument("--second_pass", help="second pass connection", action="store_true")
+    parser.add_argument("--gmm", help="use gmm for edges selection", action="store_true")
     parser.add_argument("-o", "--output", help="output path", default="patch.result")
     args = parser.parse_args()
 
@@ -542,7 +597,7 @@ def main():
 
     samples = parse_sample_list(args.list_sample)
 
-    edge_aggregator = EdgeAggregator(args.path, samples)
+    edge_aggregator = EdgeAggregator(args.path, samples, args.gmm)
     edges = edge_aggregator.aggregate()
     if args.debug:
         for pair, values in sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2])):

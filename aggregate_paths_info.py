@@ -3,9 +3,12 @@ import os
 from collections import defaultdict
 from combine_connections import read_agp_file, merge_segments, reverse_segments
 from ragtag_utilities.utilities import run_oae, get_ragtag_version, get_impuT2T_version
+
+os.environ["MKL_THREADING_LAYER"] = "GNU"
 import pysam
 import numpy as np
 from sklearn.mixture import GaussianMixture
+
 
 def parse_sample_list(list_sample: str) -> list[str]:
     with open(list_sample) as f:
@@ -687,7 +690,7 @@ def main():
             args.output + ".relevant_seq.fasta"
         ]
         run_oae(cmd, args.output + ".patch.fasta", "test.log")
-
+    
 
 if __name__ == "__main__":
     main()

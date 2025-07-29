@@ -679,6 +679,7 @@ def main():
             for segment in component:
                 if segment['component_id'].split("_")[0] in samples:
                     relevant_samples.add(segment['component_id'].split("_")[0])
+        relevant_samples = sorted(list(relevant_samples))
         
         print(f"Relevant samples: {relevant_samples}")
         print(f"Relevant sequences saved to {args.output}.relevant_seq.fasta...")

@@ -145,8 +145,23 @@ def merge_segments(core_segments: List[Dict], connection_segments: List[Dict]) -
             print("WARNING: Core segment and connection segment have different orientations")
             return False
         elif core_segments[-1]['component_beg'] > connection_segments[0]['component_end']:
-            print("WARNING: Core segment begins after connection segment")
-            return False
+            print(f"WARNING: Core segment begins after connection segment, core_beg, connection_end: {core_segments[-1]['component_beg'], connection_segments[0]['component_end']}")
+            if core_segments[-1]['component_beg'] - connection_segments[0]['component_end'] > connection_segments[1]['component_end'] - connection_segments[0]['component_beg']:
+                return False
+            else:
+                # try to connect to the connection_segments[1:]
+                connected_segment = {
+                    'object': core_segments[-2]['object'],
+                    'object_beg': core_segments[-2]['object_beg'],
+                    'object_end': core_segments[-2]['object_end'] - (core_segments[-1]['component_beg'] - connection_segments[0]['component_end']),
+                    'part_num': core_segments[-2]['part_num'],
+                    'component_type': core_segments[-2]['component_type'],
+                    'component_id': core_segments[-2]['component_id'],
+                    'component_beg': core_segments[-2]['component_beg'],
+                    'component_end': core_segments[-2]['component_end'] - (core_segments[-1]['component_beg'] - connection_segments[0]['component_end']),
+                    'orientation': core_segments[-2]['orientation']
+                }
+                return core_segments[:-2] + [connected_segment] + adjust_coordinates(connection_segments[1:], connected_segment['object_end'] + 1, connected_segment['part_num'] + 1)
         else:
             connected_segment = {
                 'object': core_segments[-1]['object'],
@@ -161,7 +176,7 @@ def merge_segments(core_segments: List[Dict], connection_segments: List[Dict]) -
             }
             return core_segments[:-1] + [connected_segment] + adjust_coordinates(connection_segments[1:], connected_segment['object_end'] + 1, connected_segment['part_num'] + 1)
     else:
-        print("WARNING: Core segment does not end with start node")
+        print(f"WARNING: Core segment does not end with start node, last_core_node, start_node: {core_segments[-1]['component_id']}, {start_node}")
         return False
 
 

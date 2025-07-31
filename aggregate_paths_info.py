@@ -288,12 +288,14 @@ class PathFinder:
                     for visited_contig in set_visited_contigs:
                         set_visited_nodes.update([visited_contig + '_b', visited_contig + '_e'])
 
-                    if len(nodes - set_visited_nodes) == 0:
+                    remaining_edges = [edge for edge in edges_sorted if edge[0][0] not in set_visited_nodes and edge[0][1] not in set_visited_nodes]
+                    if len(nodes - set_visited_nodes) == 0 or len(remaining_edges) == 0:
                         final_results.append(current_path + [path])
                         print("......"*20, "Final result found!")
                         #return final_results
                     else:
                         new_end_nodes = end_nodes - set_visited_nodes
+                        #print(f"nodes - set_visited_nodes: {nodes - set_visited_nodes}")
                         #print(f"new_end_nodes: {new_end_nodes}")
                         #print(f"path: {path}")
                         self.search_paths(final_results, current_path + [path], set_visited_contigs, set_visited_nodes, edges_sorted, new_end_nodes, flag_exhaustive)

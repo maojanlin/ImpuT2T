@@ -75,7 +75,7 @@ class EdgeAggregator:
                         candidate_scores = []
                         candidate_samples = []
                         for idx in range(len(dists)):
-                            if dists[idx] <= mean + std and dists[idx] >= mean - std and relevant_samples[idx] != "HG002.2":
+                            if dists[idx] <= mean + 1.5*std and dists[idx] >= mean - 1.5*std and relevant_samples[idx] != "HG002.2":
                                 candidate_dists.append(dists[idx])
                                 candidate_scores.append(scores[idx])
                                 candidate_samples.append(relevant_samples[idx])
@@ -263,7 +263,7 @@ class PathFinder:
         #print(f"[0]: {start_nodes[0]}")
         if start_nodes[0] in visited_nodes:
             final_results.append(current_path)
-            print("......"*20, "Duplicate start node found!")
+            #print("......"*20, "Duplicate start node found!")
             return final_results
         
         for idx, start_node in enumerate(start_nodes):
@@ -274,14 +274,14 @@ class PathFinder:
             self.dfs_edge(results, start_node, visited_contigs.copy(), [], 0, visited_nodes)
             # choose the longest path with the highest score or the path stop with end-nodes
             dict_candidate_paths = self.find_candidate_paths(results, end_nodes)
-            for terminal_node, paths in dict_candidate_paths.items():
-                print(f"terminal_node: {terminal_node}")
-                for path in paths:
-                    print(f"path: {path}")
-            print("--------------------------------------------------"*2)
+            #for terminal_node, paths in dict_candidate_paths.items():
+            #    print(f"terminal_node: {terminal_node}")
+            #    for path in paths:
+            #        print(f"path: {path}")
+            #print("--------------------------------------------------"*2)
             for idy, (terminal_node, paths) in enumerate(dict_candidate_paths.items()):
                 for idz, path in enumerate(sorted(paths, key=lambda x: -x[0])):
-                    print(idx, idy, idz, terminal_node, path)
+                    #print(idx, idy, idz, terminal_node, path)
                     contig_in_path = set([node[:-2] for node in path[1]])
                     set_visited_contigs = visited_contigs.union(contig_in_path)
                     set_visited_nodes = set()
@@ -291,7 +291,7 @@ class PathFinder:
                     remaining_edges = [edge for edge in edges_sorted if edge[0][0] not in set_visited_nodes and edge[0][1] not in set_visited_nodes]
                     if len(nodes - set_visited_nodes) == 0 or len(remaining_edges) == 0:
                         final_results.append(current_path + [path])
-                        print("......"*20, "Final result found!")
+                        #print("......"*20, "Final result found!")
                         #return final_results
                     else:
                         new_end_nodes = end_nodes - set_visited_nodes
@@ -334,7 +334,8 @@ class PathFinder:
         # Build adjacency list for connections
         adj = defaultdict(list)
         in_degree = defaultdict(int)
-        for idx, idj, (from_node, to_node) in possible_connections:
+        print("possible_connections: ", sorted(possible_connections, key=lambda x: (x[0], x[1])))
+        for idx, idj, (from_node, to_node) in sorted(possible_connections, key=lambda x: (x[0], x[1])):
             adj[idx].append((idj, from_node, to_node))
             in_degree[idj] += 1
 
@@ -516,7 +517,7 @@ class SequenceCollector:
         self.ref_path = ref_path
     
     def collect(self, relevant_ref_ids, contig_fasta_path, output_path):
-        list_files = [self.ref_path + id + ".fa" for id in relevant_ref_ids]
+        list_files = [self.ref_path + id + ".fasta" for id in relevant_ref_ids]
         with open(output_path + ".relevant_seq.fasta", "w") as out_f:
             for fasta in [contig_fasta_path] + list_files:
                 with open(fasta, "r") as in_f:

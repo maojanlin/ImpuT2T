@@ -75,7 +75,7 @@ class EdgeAggregator:
                         candidate_scores = []
                         candidate_samples = []
                         for idx in range(len(dists)):
-                            if dists[idx] <= mean + 1.5*std and dists[idx] >= mean - 1.5*std and relevant_samples[idx] != "HG002.2":
+                            if dists[idx] <= mean + 1.5*std and dists[idx] >= mean - 1.5*std:
                                 candidate_dists.append(dists[idx])
                                 candidate_scores.append(scores[idx])
                                 candidate_samples.append(relevant_samples[idx])

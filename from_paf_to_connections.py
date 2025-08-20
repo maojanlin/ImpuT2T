@@ -219,8 +219,8 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
                 merged_segments.extend(list_idx)
                 continue
             
-            # Check if segments overlap
-            if als.ref_ends[idx_0] >= als.ref_starts[idx_1]:
+            # Check if segments overlap, query_ends and query_starts are the real position on the reference/pangenome
+            if als.query_ends[idx_0] >= als.query_starts[idx_1]:
                 # Segments overlap, can merge
                 if debug:
                     print(f"Merging overlapping segments for {header}: {idx_0} and {idx_1}")

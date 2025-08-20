@@ -292,10 +292,14 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
                 #print("contained", idx, als.ref_headers[idx], als.ref_starts[idx], right_most_position)
                 contained_segments.append(idx)
             else:
+                # split case, check if the other segment is also contained
                 list_index = dict_headers_to_idx[als.ref_headers[idx]]
-                if list_index[0] == idx and als.query_ends[list_index[1]] < right_most_position:
-                    #print("contained", idx, als.ref_headers[idx], als.ref_starts[idx], right_most_position)
-                    contained_segments.append(idx)
+                if list_index[0] == idx:  # First segment
+                    if als.query_ends[list_index[1]] < right_most_position:
+                        contained_segments.append(idx)
+                elif list_index[1] == idx:  # Second segment
+                    if als.query_starts[list_index[0]] < right_most_position:
+                        contained_segments.append(idx)
         for idx in list_connectable:
             if idx not in contained_segments:
                 print(idx, als.ref_headers[idx], dict_ref_end_connectable['L_end'][idx], dict_ref_end_connectable['R_end'][idx], als.ref_starts[idx], als.ref_ends[idx], '\t|\t', als.strands[idx], als.query_starts[idx], als.query_ends[idx])

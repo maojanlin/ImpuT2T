@@ -92,7 +92,7 @@ def read_genome_alignments(aln_file, flag_primary=False, query_blacklist=[], ref
     return ctg_alns
 
 
-def get_connectable_fragments(ctg_alns, components_fn, debug=False):
+def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINAL_RATIO=0.05, debug=False):
     """
     Build a directed scaffold graph from filtered alignments
     """
@@ -138,6 +138,8 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
                     return True, 2
         return False, 0
 
+    # notice that the query_seq is the reference name, and the ref_seq is the query contig name
+    dict_all_connections = dict() # key: query_seq, value: list of connections
     for query_seq in ctg_alns:
         als = ctg_alns[query_seq]
         als.sort_by_query()
@@ -148,14 +150,36 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
         #   L_end: list of booleans, True if the reference end is connectable to the left end of the reference
         #   R_end: list of booleans, True if the reference end is connectable to the right end of the reference
         #   checking if a contig is split into multiple segments, if so, only boundary segments are connectable for the corresponding ends
+        #   NEW: segments must also overlap the terminal regions (TERMINAL_RATIO) of the contig
         dict_ref_end_connectable = {'L_end': [], 'R_end': []}
         for i in range(als.num_alns):
-            #if debug:
-            #    print(i, als.ref_headers[i], '(', als.ref_starts[i], als.ref_ends[i],')')
+            if debug:
+                print(i, als.ref_headers[i], '(', als.ref_starts[i], als.ref_ends[i],')')
             duplicate_segments = []
             for j in range(als.num_alns):
                 if i != j and als.ref_headers[i] == als.ref_headers[j]:
                     duplicate_segments.append(j)
+            
+            # Check if segment overlaps terminal regions
+            if als.strands[i] == '+':
+                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_starts[i])):
+                    overlaps_left_terminal = als.ref_starts[i] < als.ref_lens[i] * TERMINAL_RATIO
+                else:
+                    overlaps_left_terminal = False
+                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_ends[i])):
+                    overlaps_right_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
+                else:
+                    overlaps_right_terminal = False
+            else:
+                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_starts[i])):
+                    overlaps_right_terminal = als.ref_ends[i] < als.ref_lens[i] * TERMINAL_RATIO
+                else:
+                    overlaps_right_terminal = False
+                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_ends[i])):
+                    overlaps_left_terminal = als.ref_starts[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
+                else:
+                    overlaps_left_terminal = False
+            
             if len(duplicate_segments) > 0:
                 # multiple segments, can only be connected to one end
                 dict_ref_end_connectable['L_end'].append(False)
@@ -163,18 +187,22 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
 
                 if als.ref_starts[i] <= min(als.ref_starts[ele] for ele in duplicate_segments):
                     if als.strands[i] == '+':
-                        dict_ref_end_connectable['L_end'][i] = True
+                        # Only mark as connectable if it overlaps the left terminal region
+                        dict_ref_end_connectable['L_end'][i] = overlaps_left_terminal
                     else:
-                        dict_ref_end_connectable['R_end'][i] = True
+                        # Only mark as connectable if it overlaps the right terminal region
+                        dict_ref_end_connectable['R_end'][i] = overlaps_right_terminal
                 if als.ref_ends[i] >= max(als.ref_ends[ele] for ele in duplicate_segments):
                     if als.strands[i] == '+':
-                        dict_ref_end_connectable['R_end'][i] = True
+                        # Only mark as connectable if it overlaps the right terminal region
+                        dict_ref_end_connectable['R_end'][i] = overlaps_right_terminal
                     else:
-                        dict_ref_end_connectable['L_end'][i] = True
+                        # Only mark as connectable if it overlaps the left terminal region
+                        dict_ref_end_connectable['L_end'][i] = overlaps_left_terminal
             else:
-                # single segment, can be connected to both ends
-                dict_ref_end_connectable['L_end'].append(True)
-                dict_ref_end_connectable['R_end'].append(True)
+                # single segment, can be connected to both ends only if they overlap terminal regions
+                dict_ref_end_connectable['L_end'].append(overlaps_left_terminal)
+                dict_ref_end_connectable['R_end'].append(overlaps_right_terminal)
         if debug:
             print(dict_ref_end_connectable['L_end'])
             print(dict_ref_end_connectable['R_end'])
@@ -294,12 +322,15 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
             else:
                 # split case, check if the other segment is also contained
                 list_index = dict_headers_to_idx[als.ref_headers[idx]]
-                if list_index[0] == idx:  # First segment
-                    if als.query_ends[list_index[1]] < right_most_position:
-                        contained_segments.append(idx)
-                elif list_index[1] == idx:  # Second segment
-                    if als.query_starts[list_index[0]] < right_most_position:
-                        contained_segments.append(idx)
+                if len(list_index) == 2:
+                    if list_index[0] == idx:  # First segment
+                        if als.query_ends[list_index[1]] < right_most_position:
+                            contained_segments.append(idx)
+                    elif list_index[1] == idx:  # Second segment
+                        if als.query_starts[list_index[0]] < right_most_position:
+                            contained_segments.append(idx)
+                else:
+                    contained_segments.append(idx)
         for idx in list_connectable:
             if idx not in contained_segments:
                 print(idx, als.ref_headers[idx], dict_ref_end_connectable['L_end'][idx], dict_ref_end_connectable['R_end'][idx], als.ref_starts[idx], als.ref_ends[idx], '\t|\t', als.strands[idx], als.query_starts[idx], als.query_ends[idx])
@@ -361,6 +392,9 @@ def get_connectable_fragments(ctg_alns, components_fn, debug=False):
             else:
                 print("Not Connectable", idx_l, idx_r, als.ref_headers[idx_l], '???', als.ref_headers[idx_r])
 
+        dict_all_connections[query_seq] = list_candidate_connections
+
+    return dict_all_connections
 
 
 def build_aln_scaffold_graph(ctg_alns, components_fn, max_term_dist, terminal_matches, debug=False):
@@ -695,11 +729,13 @@ def select_terminals(alns_selected_full, terminal_ratio=0.05, map_lenth=5000):
                 if full_aln.query_ends[i] > tail_best_end:
                     tail_best_end = full_aln.query_ends[i]
                     tail_best_idx = i
-        extend_length = min(full_aln.query_len, map_lenth)
+        extend_length = min(full_aln.query_len, int(map_lenth*0.5))
         if head_best_idx is not None:
-            dict_head_end_range[query_name] = (full_aln.query_starts[head_best_idx], full_aln.query_starts[head_best_idx]+extend_length)
+            #dict_head_end_range[query_name] = (full_aln.query_starts[head_best_idx], full_aln.query_starts[head_best_idx]+extend_length)
+            dict_head_end_range[query_name] = (full_aln.query_starts[head_best_idx], max(map_lenth, full_aln.query_starts[head_best_idx]+extend_length))
         if tail_best_idx is not None:
-            dict_tail_end_range[query_name] = (full_aln.query_ends[tail_best_idx]-extend_length, full_aln.query_ends[tail_best_idx])
+            #dict_tail_end_range[query_name] = (full_aln.query_ends[tail_best_idx]-extend_length, full_aln.query_ends[tail_best_idx])
+            dict_tail_end_range[query_name] = (min(full_aln.query_len-map_lenth, full_aln.query_ends[tail_best_idx]-extend_length), full_aln.query_ends[tail_best_idx])
     return dict_head_end_range, dict_tail_end_range
 
 
@@ -767,42 +803,88 @@ def process_terminals(input_fasta, reference_fasta, dict_head_end_range, dict_ta
 
 def map_terminal_to_full(alns_selected_full, alns_terminal):
     """
-    For each query in alns_selected_full, find the closest contig_name_head and contig_name_tail terminal alignments
-    to the start and end of the full alignment (on reference coordinates), and report their residue_matches.
-    Returns a dict mapping query_name to (head_residue_matches, tail_residue_matches).
+    For each query in alns_selected_full, find the best matching terminal alignments (head and tail)
+    against the selected full-length alignment segments, constrained to the same reference (ref_header).
+    
+    Data structure:
+    - Layer 1: contig_name -> 'head', 'tail'
+    - Layer 2: (ref_name, ref_start, ref_end, strand) -> best_residue_matches
+    
+    Matching logic:
+    - Forward strand (+): head covers full_start±5000, tail covers full_end±5000
+    - Reverse strand (-): head covers full_end±5000, tail covers full_start±5000
+    - Only consider terminals with matching ref_header
+    - Keep best residue_matches per (ref_name, ref_start, ref_end, strand) combination
+    
+    Returns: dict with two-layer structure for terminal matches
     """
     terminal_matches = {}
+    
     for query_name, full_aln in alns_selected_full.items():
-        # For each full alignment, find the closest head and tail terminal alignments
-        best_head_dist = float('inf')
-        best_head_residue = 0
-        best_tail_dist = float('inf')
-        best_tail_residue = 0
-        # For each alignment in the full alignment
+        terminal_matches[query_name] = {"head": {}, "tail": {}}
+        
+        head_key = f"{query_name}_head"
+        tail_key = f"{query_name}_tail"
+        
+        # Iterate over all full segments
         for i in range(full_aln.num_alns):
             full_ref_start = full_aln.ref_starts[i]
             full_ref_end = full_aln.ref_ends[i]
-            # Find all head and tail terminal alignments for this query
-            head_key = f"{query_name}_head"
-            tail_key = f"{query_name}_tail"
-            # Check head
+            full_ref_header = full_aln.ref_headers[i]
+            full_strand = full_aln.strands[i]
+            
+            # For forward strand: head->start, tail->end
+            # For reverse strand: head->end, tail->start
+            if full_strand == '+':
+                head_target = full_ref_start
+                tail_target = full_ref_end
+            else:  # reverse strand
+                head_target = full_ref_end
+                tail_target = full_ref_start
+            
+            # Check head terminal alignments
+            if head_key == "h1tg000018l_chr1_impuT2T_1_head":
+                print(head_key, alns_terminal[head_key].ref_headers)
+                print(head_key, alns_terminal[head_key].ref_starts)
+                print(head_key, alns_terminal[head_key].ref_ends)
+                print(head_key, full_ref_start, full_ref_end)
             if head_key in alns_terminal:
                 term_aln = alns_terminal[head_key]
-                # Assume only one alignment per terminal
-                term_ref_start = term_aln.ref_starts[0]
-                dist = abs(full_ref_start - term_ref_start)
-                if dist < best_head_dist:
-                    best_head_dist = dist
-                    best_head_residue = term_aln.residue_matches[0]
-            # Check tail
+                current_best_dist = 10001
+                for j in range(term_aln.num_alns):
+                    if term_aln.ref_headers[j] != full_ref_header:
+                        continue
+                    
+                    # Check if terminal covers target position ±5000
+                    term_start = term_aln.ref_starts[j]
+                    term_end = term_aln.ref_ends[j]
+                    min_dist = min(abs(term_start - head_target), abs(term_end - head_target))
+                    if min_dist <= 10000:
+                        key = (full_ref_header, full_ref_start)
+                        if min_dist < current_best_dist:
+                            current_best_dist = min_dist
+                            terminal_matches[query_name]["head"][key] = term_aln.residue_matches[j]
+            
+            # Check tail terminal alignments
             if tail_key in alns_terminal:
                 term_aln = alns_terminal[tail_key]
-                term_ref_end = term_aln.ref_ends[0]
-                dist = abs(full_ref_end - term_ref_end)
-                if dist < best_tail_dist:
-                    best_tail_dist = dist
-                    best_tail_residue = term_aln.residue_matches[0]
-        terminal_matches[query_name] = (best_head_residue, best_tail_residue)
+                current_best_dist = 10001
+                for j in range(term_aln.num_alns):
+                    if term_aln.ref_headers[j] != full_ref_header:
+                        continue
+                    
+                    # Check if terminal covers target position ±5000
+                    term_start = term_aln.ref_starts[j]
+                    term_end = term_aln.ref_ends[j]
+                    min_dist = min(abs(term_start - tail_target), abs(term_end - tail_target))
+                    if min_dist <= 10000:
+                        key = (full_ref_header, full_ref_end)
+                        if min_dist < current_best_dist:
+                            current_best_dist = min_dist
+                            terminal_matches[query_name]["tail"][key] = term_aln.residue_matches[j]
+    
+    for key, item in terminal_matches.items():
+        print("key", key, item)
     return terminal_matches
 
 
@@ -857,6 +939,7 @@ def main():
     parser.add_argument('--max_min_id_ratio', type=float, default=0.5, help='Maximum minimum identity ratio [0.7]')
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     parser.add_argument('--info_only', action='store_true', help='Output only the agp and info files without the patched fasta')
+    parser.add_argument('--connect_mode', choices=['closest', 'longest'], default='closest', help='Connection mode [closest]')
     args = parser.parse_args()
 
     full_len_paf = args.full_length
@@ -870,15 +953,113 @@ def main():
     MAX_MIN_ID_RATIO = args.max_min_id_ratio
     DEBUG = args.debug
     INFO_ONLY = args.info_only
+    CONNECT_MODE = args.connect_mode
     
     alns_full_len = read_genome_alignments(full_len_paf, True)
 
     alns_selected_full = filter_high_quality_alns(alns_full_len, minimum_length=MIN_CONTIG_LENGTH, length_ratio=TERMINAL_RATIO, max_min_id_ratio=MAX_MIN_ID_RATIO)
-
+    dict_head_end_range, dict_tail_end_range = select_terminals(alns_selected_full, terminal_ratio=TERMINAL_RATIO, map_lenth=MAP_LENGTH)
+    # Generate, align, and parse terminal sequences
+    alns_terminal = process_terminals(components_fn, reference_fn, dict_head_end_range, dict_tail_end_range, output_path, threads=threads)
+    terminal_matches = map_terminal_to_full(alns_selected_full, alns_terminal)
+    
     ref_alns = reverse_alignments(alns_selected_full)
     #aln_psg = build_aln_scaffold_graph(ref_alns, components_fn, TERMINAL_RATIO, terminal_matches, debug=DEBUG)
     print("ref_alns", "---------------------------------------------------------------------------------------")
-    ctg_alns = get_connectable_fragments(ref_alns, components_fn, debug=DEBUG)
+    dict_all_connections = get_connectable_fragments(ref_alns, components_fn, terminal_matches, TERMINAL_RATIO*2, debug=DEBUG)
+
+    sg = PatchScaffoldGraph(components_fn)
+    print("---------------------------------------------------------------------------------------")
+    for key, item in dict_all_connections.items():
+        print("================================", key, "================================")
+        for connection in item:
+            idx_l, idx_r, connection_type = connection
+            als = ref_alns[key]
+            
+            # Print connection information similar to what's in get_connectable_fragments()
+            if connection_type >= 4:
+                print("Connectable", idx_l, idx_r, als.ref_headers[idx_l], '->', als.ref_headers[idx_r])
+            elif connection_type == 2:
+                print("Right Contain", idx_l, idx_r, als.ref_headers[idx_l], '->', als.ref_headers[idx_r])
+            elif connection_type == 3:
+                print("Left Contain", idx_l, idx_r, als.ref_headers[idx_r], '->', als.ref_headers[idx_l])
+            else:
+                print("Not Connectable", idx_l, idx_r, als.ref_headers[idx_l], '???', als.ref_headers[idx_r])
+            
+            # Print detailed alignment information
+            #print(f"  Left segment {idx_l}: {als.ref_headers[idx_l]} ({als.ref_starts[idx_l]}-{als.ref_ends[idx_l]}) strand:{als.strands[idx_l]}")
+            #print(f"  Right segment {idx_r}: {als.ref_headers[idx_r]} ({als.ref_starts[idx_r]}-{als.ref_ends[idx_r]}) strand:{als.strands[idx_r]}")
+            #print(f"  Query positions: {als.query_starts[idx_l]}-{als.query_ends[idx_l]} -> {als.query_starts[idx_r]}-{als.query_ends[idx_r]}")
+            #print(f"  Connection type: {connection_type}")
+            #print()
+            # Determine the scaffold graph nodes
+            u = als.ref_headers[idx_l] + "_e"
+            l_match = 'tail', (key, als.query_ends[idx_l])
+            v = als.ref_headers[idx_r] + "_b"
+            r_match = 'head', (key, als.query_starts[idx_r])
+            if als.strands[idx_l] == "-":
+                u = als.ref_headers[idx_l] + "_b"
+                l_match = 'head', (key, als.query_starts[idx_l])
+            if als.strands[idx_r] == "-":
+                v = als.ref_headers[idx_r] + "_e"
+                r_match = 'tail', (key, als.query_ends[idx_r])
+            
+            print("key", key)
+            print((als.ref_headers[idx_l], als.query_starts[idx_l], als.query_ends[idx_l]))
+            print(l_match, terminal_matches[als.ref_headers[idx_l]][l_match[0]])
+            print(r_match, terminal_matches[als.ref_headers[idx_r]][r_match[0]])
+            left_pair_score = terminal_matches[als.ref_headers[idx_l]][l_match[0]][l_match[1]]
+            right_pair_score = terminal_matches[als.ref_headers[idx_r]][r_match[0]][r_match[1]]
+            pair_score = left_pair_score + right_pair_score
+            print("u, v, pair_score", u, v, pair_score)
+            """
+            pair_score = 0
+            if als.strands[idx_l] == "-":
+                pair_score += terminal_matches[als.ref_headers[idx_l]][0]
+            else:
+                pair_score += terminal_matches[als.ref_headers[idx_l]][1]
+            if als.strands[idx_r] == "-":
+                pair_score += terminal_matches[als.ref_headers[idx_r]][1]
+            else:
+                pair_score += terminal_matches[als.ref_headers[idx_r]][0]
+            """
+
+            # Calculate overlap (similar to the logic in get_connectable_fragments)
+            my_query_end_offset = als.ref_lens[idx_l] - als.ref_ends[idx_l]
+            if als.strands[idx_l] == '-':
+                my_query_end_offset = als.ref_starts[idx_l]
+
+            their_query_start_offset = als.ref_starts[idx_r]
+            if als.strands[idx_r] == '-':
+                their_query_start_offset = als.ref_lens[idx_r] - als.ref_ends[idx_r]
+
+            my_query_end = als.query_ends[idx_l] + my_query_end_offset
+            their_query_start = als.query_starts[idx_r] - their_query_start_offset
+            overlap = my_query_end - their_query_start
+
+            # Now create the alignment with the correct variables
+            alignment = Alignment(
+                u,
+                v,
+                key,  # Use 'key' instead of 'query_seq' since that's what you have
+                als.query_len,
+                my_query_end,
+                their_query_start,
+                0,  # Always on the query's forward strand
+                is_gap=False
+            )
+            sg.add_edge(u, v, alignment, pair_score, -overlap)
+    print("sg.edges", "---------------------------------------------------------------------------------------")
+    for u, v in sg.edges:
+        print(u, v, sg[u][v]["weight"], sg[u][v]["score"], sg[u][v]["dist"])
+    match_psg = sg.max_weight_matching()
+    print("match_psg.edges", "---------------------------------------------------------------------------------------")
+    for u, v in match_psg.edges:
+        print(u, v, match_psg[u][v]["weight"], match_psg[u][v]["score"], match_psg[u][v]["dist"])
+    match_psg.write_agp(output_path+'.agp', components_fn, add_suffix_to_unplaced=False)
+    #match_psg.write_agp('0825.test.agp', components_fn, add_suffix_to_unplaced=False)
+    output_graph_info(match_psg, output_path + ".info")
+    exit()
     #dict_head_end_range, dict_tail_end_range = select_terminals(alns_selected_full, terminal_ratio=TERMINAL_RATIO, map_lenth=MAP_LENGTH)
     # Generate, align, and parse terminal sequences
     #alns_terminal = process_terminals(components_fn, reference_fn, dict_head_end_range, dict_tail_end_range, output_path, threads=threads)

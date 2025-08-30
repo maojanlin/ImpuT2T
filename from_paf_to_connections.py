@@ -171,12 +171,12 @@ def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINA
                 else:
                     overlaps_right_terminal = False
             else:
-                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_starts[i])):
-                    overlaps_right_terminal = als.ref_ends[i] < als.ref_lens[i] * TERMINAL_RATIO
+                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_ends[i])):
+                    overlaps_right_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
                 else:
                     overlaps_right_terminal = False
-                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_ends[i])):
-                    overlaps_left_terminal = als.ref_starts[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
+                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_starts[i])):
+                    overlaps_left_terminal = als.ref_starts[i] < als.ref_lens[i] * TERMINAL_RATIO
                 else:
                     overlaps_left_terminal = False
             
@@ -277,10 +277,10 @@ def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINA
                 
                 # Update the alignment information for the merged segment
                 # Use start positions from L_end segment and end positions from R_end segment
-                als.ref_starts[l_end_idx] = min(als.ref_starts[idx_0], als.ref_starts[idx_1])
-                als.ref_ends[l_end_idx] = max(als.ref_ends[idx_0], als.ref_ends[idx_1])
-                als.query_starts[l_end_idx] = min(als.query_starts[idx_0], als.query_starts[idx_1])
-                als.query_ends[l_end_idx] = max(als.query_ends[idx_0], als.query_ends[idx_1])
+                als.ref_starts[l_end_idx] = als.ref_starts[l_end_idx] #min(als.ref_starts[idx_0], als.ref_starts[idx_1])
+                als.ref_ends[l_end_idx] = als.ref_ends[r_end_idx] #max(als.ref_ends[idx_0], als.ref_ends[idx_1])
+                als.query_starts[l_end_idx] = als.query_starts[l_end_idx] #min(als.query_starts[idx_0], als.query_starts[idx_1])
+                als.query_ends[l_end_idx] = als.query_ends[r_end_idx] #max(als.query_ends[idx_0], als.query_ends[idx_1])
                 
                 # Add the merged segment to our new list
                 merged_segments.append(l_end_idx)
@@ -843,11 +843,6 @@ def map_terminal_to_full(alns_selected_full, alns_terminal):
                 tail_target = full_ref_start
             
             # Check head terminal alignments
-            if head_key == "h1tg000018l_chr1_impuT2T_1_head":
-                print(head_key, alns_terminal[head_key].ref_headers)
-                print(head_key, alns_terminal[head_key].ref_starts)
-                print(head_key, alns_terminal[head_key].ref_ends)
-                print(head_key, full_ref_start, full_ref_end)
             if head_key in alns_terminal:
                 term_aln = alns_terminal[head_key]
                 current_best_dist = 10001
@@ -860,7 +855,7 @@ def map_terminal_to_full(alns_selected_full, alns_terminal):
                     term_end = term_aln.ref_ends[j]
                     min_dist = min(abs(term_start - head_target), abs(term_end - head_target))
                     if min_dist <= 10000:
-                        key = (full_ref_header, full_ref_start)
+                        key = (full_ref_header, head_target)
                         if min_dist < current_best_dist:
                             current_best_dist = min_dist
                             terminal_matches[query_name]["head"][key] = term_aln.residue_matches[j]
@@ -878,7 +873,7 @@ def map_terminal_to_full(alns_selected_full, alns_terminal):
                     term_end = term_aln.ref_ends[j]
                     min_dist = min(abs(term_start - tail_target), abs(term_end - tail_target))
                     if min_dist <= 10000:
-                        key = (full_ref_header, full_ref_end)
+                        key = (full_ref_header, tail_target)
                         if min_dist < current_best_dist:
                             current_best_dist = min_dist
                             terminal_matches[query_name]["tail"][key] = term_aln.residue_matches[j]
@@ -968,6 +963,61 @@ def main():
     print("ref_alns", "---------------------------------------------------------------------------------------")
     dict_all_connections = get_connectable_fragments(ref_alns, components_fn, terminal_matches, TERMINAL_RATIO*2, debug=DEBUG)
 
+    dict_node_connections = {}
+    if CONNECT_MODE == 'closest':
+        # sorted the connections by the two nodes
+        for key, item in dict_all_connections.items():
+            for connection in item:
+                idx_l, idx_r, connection_type = connection
+                als = ref_alns[key]
+                my_query_end_offset = als.ref_lens[idx_l] - als.ref_ends[idx_l]
+                if als.strands[idx_l] == '-':
+                    my_query_end_offset = als.ref_starts[idx_l]
+
+                their_query_start_offset = als.ref_starts[idx_r]
+                if als.strands[idx_r] == '-':
+                    their_query_start_offset = als.ref_lens[idx_r] - als.ref_ends[idx_r]
+
+                my_query_end = als.query_ends[idx_l] + my_query_end_offset
+                their_query_start = als.query_starts[idx_r] - their_query_start_offset
+                overlap = my_query_end - their_query_start
+
+                u = als.ref_headers[idx_l] + "_e"
+                v = als.ref_headers[idx_r] + "_b"
+                if als.strands[idx_l] == "-":
+                    u = als.ref_headers[idx_l] + "_b"
+                if als.strands[idx_r] == "-":
+                    v = als.ref_headers[idx_r] + "_e"
+
+                if u in dict_node_connections:
+                    dict_node_connections[u].append((abs(overlap), key, idx_l, idx_r, connection_type))
+                else:
+                    dict_node_connections[u] = [(abs(overlap), key, idx_l, idx_r, connection_type)]
+                if v in dict_node_connections:
+                    dict_node_connections[v].append((abs(overlap), key, idx_l, idx_r, connection_type))
+                else:
+                    dict_node_connections[v] = [(abs(overlap), key, idx_l, idx_r, connection_type)]
+        # filter the connections and only keep the one with the cloest distance
+        removed_dict = {}
+        for node, connections in dict_node_connections.items():
+            connections.sort(key=lambda x: x[0])
+            if connections[0][-1] >= 4:
+                # remove others:
+                for connection in connections[1:]:
+                    key, idx_l, idx_r, connection_type = connection[1:]
+                    if key not in removed_dict:
+                        removed_dict[key] = set()
+                    removed_dict[key].add((idx_l, idx_r, connection_type))
+                    print("REMOVED!", key, idx_l, idx_r, ref_alns[key].ref_headers[idx_l], ref_alns[key].ref_headers[idx_r], connection_type)
+        for key, item in dict_all_connections.items():
+            new_item = []
+            if key not in removed_dict:
+                continue
+            for connection in item:
+                if connection not in removed_dict[key]:
+                    new_item.append(connection)
+            dict_all_connections[key] = new_item
+
     sg = PatchScaffoldGraph(components_fn)
     print("---------------------------------------------------------------------------------------")
     for key, item in dict_all_connections.items():
@@ -999,10 +1049,10 @@ def main():
             r_match = 'head', (key, als.query_starts[idx_r])
             if als.strands[idx_l] == "-":
                 u = als.ref_headers[idx_l] + "_b"
-                l_match = 'head', (key, als.query_starts[idx_l])
+                l_match = 'head', (key, als.query_ends[idx_l])
             if als.strands[idx_r] == "-":
                 v = als.ref_headers[idx_r] + "_e"
-                r_match = 'tail', (key, als.query_ends[idx_r])
+                r_match = 'tail', (key, als.query_starts[idx_r])
             
             print("key", key)
             print((als.ref_headers[idx_l], als.query_starts[idx_l], als.query_ends[idx_l]))

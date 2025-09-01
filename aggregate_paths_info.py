@@ -127,10 +127,17 @@ class GraphBuilder:
                     self.filtered_edges.add((node, neighbor))
                     self.filtered_edges.add((neighbor, node))
 
+        dict_node_AF_count = defaultdict(int)
+        for pair, values in edges_sorted:
+            AF, AS, _ = values
+            dict_node_AF_count[pair[0]] += AF
+            dict_node_AF_count[pair[1]] += AF
+
         for pair, values in edges_sorted:
             u, v = pair
             AF, AS, _ = values
-            w = values[self.weight_type]
+            #w = values[self.weight_type]
+            w = AS*AF*2/(dict_node_AF_count[u]+dict_node_AF_count[v])
             if AS < self.AS_threshold: # filtering through AS threshold
                 self.filtered_edges.add((u, v))
                 self.filtered_edges.add((v, u))
@@ -311,21 +318,27 @@ class PathFinder:
             total_score += score
             if len(path) <= 2:
                 dangling_contig_count += 1
+                # check the orientation of the path
+                if path[0].endswith("_b"):
+                    new_paths.append((score, tuple(path)))
+                else:
+                    new_paths.append((score, tuple(path[::-1])))
             else:
                 if path[-1] not in end_nodes:
                     non_end_node_count += 1
                 if path[0] not in end_nodes:
                     non_end_node_count += 1
-            # check the orientation of the path
-            if int(path[-1].split("_")[-2]) > int(path[0].split("_")[-2]):
-                new_paths.append((score, tuple(path)))
-            else:
-                new_paths.append((score, tuple(path[::-1])))
+                # check the orientation of the path
+                if int(path[-1].split("_")[-2]) > int(path[0].split("_")[-2]):
+                    new_paths.append((score, tuple(path)))
+                else:
+                    new_paths.append((score, tuple(path[::-1])))
         new_paths = sorted(new_paths, key=lambda x: int(x[1][0].split("_")[-2]))
         return (total_score, non_end_node_count, dangling_contig_count, tuple(new_paths))
 
     def second_pass_merge(self, paths, possible_connections):
         # Build mapping from end nodes to component indices
+        print('--------------------------------'*2, "second_pass_merge")
         end_to_idx = {}
         for idx, path in enumerate(paths):
             end_to_idx[path[1][0]] = idx  # start
@@ -339,6 +352,9 @@ class PathFinder:
             adj[idx].append((idj, from_node, to_node))
             in_degree[idj] += 1
 
+        print("adj: ", adj)
+        print("in_degree: ", in_degree)
+
         # Find starting components (those not pointed to by any connection)
         start_indices = [i for i in range(len(paths)) if in_degree[i] == 0]
 
@@ -346,6 +362,11 @@ class PathFinder:
         merged_indices = []
         visited = set()
 
+        # Track available ends for each component
+        available_ends = {}
+        for idx, path in enumerate(paths):
+            available_ends[idx] = {path[1][0], path[1][-1]}  # Both ends start available
+        
         for start in start_indices:
             if start in visited:
                 continue
@@ -353,13 +374,43 @@ class PathFinder:
             merged = list(paths[current][1])
             component_indices = [current]
             visited.add(current)
+            
+            # Mark the start end as used
+            available_ends[current].discard(paths[current][1][0])
+            
             while adj[current]:
-                next_idx, from_node, to_node = adj[current][0]  # assuming only one connection for simplicity
-                # Insert the connecting edge
-                merged.extend(paths[next_idx][1])
+                next_idx, from_node, to_node = adj[current][0]
+                
+                # Validate: from_node must be available in current component
+                if from_node not in available_ends[current]:
+                    print(f"Warning: {from_node} not available in component {current}")
+                    # Remove this connection and try the next one
+                    adj[current].pop(0)
+                    continue
+                    
+                # Validate: to_node must be available in next component
+                if to_node not in available_ends[next_idx]:
+                    print(f"Warning: {to_node} not available in component {next_idx}")
+                    adj[current].pop(0)
+                    continue
+                
+                # Mark both ends as used
+                available_ends[current].discard(from_node)
+                available_ends[next_idx].discard(to_node)
+                
+                # Now do the merge with proper orientation
+                if to_node == paths[next_idx][1][0]:
+                    merged.extend(paths[next_idx][1])
+                elif to_node == paths[next_idx][1][-1]:
+                    merged.extend(paths[next_idx][1][::-1])
+                else:
+                    print("******error: "*100, to_node, "not found in ", paths[next_idx][1])
+                    exit()
+                    
                 component_indices.append(next_idx)
                 visited.add(next_idx)
                 current = next_idx
+                
             merged_paths.append(tuple(merged))
             merged_indices.append(tuple(component_indices))
 
@@ -383,14 +434,32 @@ class PathFinder:
 
             possible_connections = set()
             for idx, (end_node_b, end_node_e) in enumerate(end_nodes):
+                same_contig_flag_i = False
+                if end_node_b[:-2] == end_node_e[:-2]:
+                    same_contig_flag_i = True
                 for idj in range(idx+1, len(end_nodes)):
+                    same_contig_flag_j = False
                     (end_node_b_2, end_node_e_2) = end_nodes[idj]
+                    if end_node_b_2[:-2] == end_node_e_2[:-2]:
+                        same_contig_flag_j = True
                     if end_node_b not in (end_node_b_2, end_node_e_2) and end_node_e not in (end_node_b_2, end_node_e_2):
+                        if same_contig_flag_i == True:
+                            combination_i = [end_node_e, end_node_b]
+                        else:
+                            combination_i = [end_node_e]
+                        if same_contig_flag_j == True:
+                            combination_j = [end_node_b_2, end_node_e_2]
+                        else:
+                            combination_j = [end_node_b_2]
                         #possible_connections.add((end_node_b, end_node_b_2))
                         #possible_connections.add((end_node_b, end_node_e_2))
                         #possible_connections.add((end_node_e, end_node_e_2))
-                        if (end_node_e, end_node_b_2) in filtered_edges:
-                            possible_connections.add((idx, idj, (end_node_e, end_node_b_2)))
+                        for comb_i in combination_i:
+                            for comb_j in combination_j:
+                                if (comb_i, comb_j) in filtered_edges:
+                                    possible_connections.add((idx, idj, (comb_i, comb_j)))
+                        #if (end_node_e, end_node_b_2) in filtered_edges:
+                        #    possible_connections.add((idx, idj, (end_node_e, end_node_b_2)))
             
             merged_indices, merged_paths = self.second_pass_merge(paths, possible_connections)
             print("Merged paths: ", merged_paths)
@@ -633,6 +702,7 @@ def main():
     sorted_standardized_result = sorted(list(standardized_result), key=lambda x: -x[0])
     for ele in sorted_standardized_result:
         print(ele)
+    print("############", "########################"*2)
     
     if args.second_pass:
         print("Try connecting with filtered connections in the first pass")

@@ -149,29 +149,41 @@ def merge_segments(core_segments: List[Dict], connection_segments: List[Dict]) -
             if core_segments[-1]['component_beg'] - connection_segments[0]['component_end'] > connection_segments[1]['component_end'] - connection_segments[0]['component_beg']:
                 return False
             else:
+                if core_segments[-2]['orientation'] == '+':
+                    element_beg = core_segments[-2]['component_beg']
+                    element_end = core_segments[-2]['component_end'] - (core_segments[-1]['component_beg'] - connection_segments[0]['component_end'])
+                else:
+                    element_beg = core_segments[-2]['component_beg'] + (core_segments[-1]['component_beg'] - connection_segments[0]['component_end'])
+                    element_end = core_segments[-2]['component_end']
                 # try to connect to the connection_segments[1:]
                 connected_segment = {
                     'object': core_segments[-2]['object'],
                     'object_beg': core_segments[-2]['object_beg'],
-                    'object_end': core_segments[-2]['object_end'] - (core_segments[-1]['component_beg'] - connection_segments[0]['component_end']),
+                    'object_end': core_segments[-2]['object_end'] + element_end - element_beg,
                     'part_num': core_segments[-2]['part_num'],
                     'component_type': core_segments[-2]['component_type'],
                     'component_id': core_segments[-2]['component_id'],
-                    'component_beg': core_segments[-2]['component_beg'],
-                    'component_end': core_segments[-2]['component_end'] - (core_segments[-1]['component_beg'] - connection_segments[0]['component_end']),
+                    'component_beg': element_beg,
+                    'component_end': element_end,
                     'orientation': core_segments[-2]['orientation']
                 }
                 return core_segments[:-2] + [connected_segment] + adjust_coordinates(connection_segments[1:], connected_segment['object_end'] + 1, connected_segment['part_num'] + 1)
         else:
+            if core_segments[-1]['orientation'] == '+':
+                element_beg = core_segments[-1]['component_beg']
+                element_end = connection_segments[0]['component_end']
+            else:
+                element_beg = connection_segments[0]['component_beg']
+                element_end = core_segments[-1]['component_end']
             connected_segment = {
                 'object': core_segments[-1]['object'],
                 'object_beg': core_segments[-1]['object_beg'],
-                'object_end': core_segments[-1]['object_beg'] + connection_segments[0]['component_end'] - core_segments[-1]['component_beg'],
+                'object_end': core_segments[-1]['object_beg'] + element_end - element_beg,
                 'part_num': core_segments[-1]['part_num'],
                 'component_type': core_segments[-1]['component_type'],
                 'component_id': connection_segments[0]['component_id'],
-                'component_beg': core_segments[-1]['component_beg'],
-                'component_end': connection_segments[0]['component_end'],
+                'component_beg': element_beg,
+                'component_end': element_end,
                 'orientation': core_segments[-1]['orientation']
             }
             return core_segments[:-1] + [connected_segment] + adjust_coordinates(connection_segments[1:], connected_segment['object_end'] + 1, connected_segment['part_num'] + 1)
@@ -201,8 +213,8 @@ def process_connections(input_path: str, output_path: str, connections_file: str
             
             agp_entries = read_agp_file(agp_path)
             segments = find_connection_segments(agp_entries, start_node[:-2], end_node[:-2])
-            print('--------------------------------'*3)
-            print(segments)
+            #print('--------------------------------'*3)
+            #print(segments)
             
             if segments:
                 #adjusted_segments = adjust_coordinates(segments, current_pos)

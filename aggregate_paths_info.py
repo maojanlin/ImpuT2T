@@ -37,7 +37,7 @@ class EdgeAggregator:
         best_k = np.argmin(bics)
         best_model = models[best_k]
         return best_model, best_k+1
-
+    
     def aggregate(self):
         """
         edges:
@@ -62,11 +62,12 @@ class EdgeAggregator:
                 scores = [s for s, d in info[1]]
                 dists = [d for s, d in info[1]]
                 relevant_samples = info[0]
-                if len(info[0]) > 10:
+                if len(relevant_samples) > 10:
                     gmm, best_k = self.fit_gmm(np.array(dists))
                     means = gmm.means_.flatten()
                     stds = np.sqrt(gmm.covariances_.flatten())  # for 1D case
-                    print(f"================================== Best k: {best_k} ==================================")
+                    print(f"====================================== Best k: {best_k} ======================================")
+                    print(f"======== pair: {pair} ========")
                     print(f"GMM means: {means}, stds: {stds}")
                     gmm_scores = []
                     gmm_samples = []
@@ -75,7 +76,9 @@ class EdgeAggregator:
                         candidate_scores = []
                         candidate_samples = []
                         for idx in range(len(dists)):
-                            if dists[idx] <= mean + 1.5*std and dists[idx] >= mean - 1.5*std:
+                            upper_bound = mean + 1.5*std
+                            lower_bound = mean - 1.5*std if mean - 1.5*std > 0 else mean - std
+                            if dists[idx] <= upper_bound and dists[idx] >= lower_bound:
                                 candidate_dists.append(dists[idx])
                                 candidate_scores.append(scores[idx])
                                 candidate_samples.append(relevant_samples[idx])
@@ -84,10 +87,10 @@ class EdgeAggregator:
                             gmm_scores.append(candidate_scores[best_close_idx])
                             gmm_samples.append(candidate_samples[best_close_idx])
                     final_selected_idx = np.argmax(gmm_scores)
-                    self.edges[pair] = [len(info[0]), gmm_scores[final_selected_idx], gmm_samples[final_selected_idx]]
+                    self.edges[pair] = [len(relevant_samples), gmm_scores[final_selected_idx], gmm_samples[final_selected_idx]]
                 else:
                     idx = np.argmax(scores)
-                    self.edges[pair] = [len(info[0]), scores[idx], relevant_samples[idx]]
+                    self.edges[pair] = [len(relevant_samples), scores[idx], relevant_samples[idx]]
         else:
             for pair, info in self.raw_edges.items():
                 idx = np.argmax(info[1], key=lambda x: x[0])

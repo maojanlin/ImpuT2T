@@ -1,0 +1,906 @@
+import argparse
+import os
+from collections import defaultdict
+from combine_connections import read_agp_file, merge_segments, reverse_segments
+from ragtag_utilities.utilities import run_oae, get_ragtag_version, get_impuT2T_version
+
+os.environ["MKL_THREADING_LAYER"] = "GNU"
+import pysam
+import numpy as np
+from sklearn.mixture import GaussianMixture
+
+
+def parse_sample_list(list_sample: str) -> list[str]:
+    with open(list_sample) as f:
+        return [line.strip() for line in f if line.strip()]
+
+class EdgeAggregator:
+    def __init__(self, input_path: str, samples: list[str], gmm: bool):
+        self.input_path = input_path
+        self.samples = samples
+        self.gmm = gmm
+        self.raw_edges = {}
+        self.edges = {}
+
+    def fit_gmm(self, x, max_components=10, cutoff=0.1):
+        bics = []
+        models = []
+        x = x.reshape(-1, 1)
+        for k in range(1, max_components + 1):
+            gmm = GaussianMixture(n_components=k, covariance_type='full').fit(x)
+            weights = gmm.weights_
+            significant_components = weights > cutoff
+            if significant_components.sum() < len(significant_components):
+                break
+            bics.append(gmm.bic(x))
+            models.append(gmm)
+        best_k = np.argmin(bics)
+        best_model = models[best_k]
+        return best_model, best_k+1
+
+    def aggregate(self):
+        """
+        edges:
+        - key: (u, v) # sorted
+        - value: (weight, max_score, max_sample_id)
+        """
+        for sample in self.samples:
+            if os.path.exists(self.input_path + sample + ".info"):
+                with open(self.input_path + sample + ".info", "r") as f:
+                    for line in f.readlines():
+                        u, v, score, dist = line.strip().split("\t")
+                        pair = tuple(sorted([u, v]))
+                        if pair not in self.raw_edges:
+                            self.raw_edges[pair] = [[sample], [(int(score), int(dist))]]
+                        else:
+                            self.raw_edges[pair][0].append(sample)
+                            self.raw_edges[pair][1].append((int(score), int(dist)))
+            else:
+                print(f"Warning: {sample} not found in {self.input_path}")
+        if self.gmm:
+            for pair, info in self.raw_edges.items():
+                scores = [s for s, d in info[1]]
+                dists = [d for s, d in info[1]]
+                relevant_samples = info[0]
+                if len(info[0]) > 10:
+                    gmm, best_k = self.fit_gmm(np.array(dists))
+                    means = gmm.means_.flatten()
+                    stds = np.sqrt(gmm.covariances_.flatten())  # for 1D case
+                    print(f"================================== Best k: {best_k} ==================================")
+                    print(f"GMM means: {means}, stds: {stds}")
+                    gmm_scores = []
+                    gmm_samples = []
+                    for mean, std in zip(means, stds):
+                        candidate_dists = []
+                        candidate_scores = []
+                        candidate_samples = []
+                        for idx in range(len(dists)):
+                            if dists[idx] <= mean + 1.5*std and dists[idx] >= mean - 1.5*std:
+                                candidate_dists.append(dists[idx])
+                                candidate_scores.append(scores[idx])
+                                candidate_samples.append(relevant_samples[idx])
+                        if len(candidate_dists) > 0:
+                            best_close_idx = np.argmax(candidate_scores)
+                            gmm_scores.append(candidate_scores[best_close_idx])
+                            gmm_samples.append(candidate_samples[best_close_idx])
+                    final_selected_idx = np.argmax(gmm_scores)
+                    self.edges[pair] = [len(info[0]), gmm_scores[final_selected_idx], gmm_samples[final_selected_idx]]
+                else:
+                    idx = np.argmax(scores)
+                    self.edges[pair] = [len(info[0]), scores[idx], relevant_samples[idx]]
+        else:
+            for pair, info in self.raw_edges.items():
+                idx = np.argmax(info[1], key=lambda x: x[0])
+                self.edges[pair] = [len(info[0]), info[1][idx][0], info[0][idx]]
+
+        return self.edges
+
+class GraphBuilder:
+    def __init__(self, edges, weight_type, weight_ratio, AS_threshold, AF_threshold, sample_size):
+        self.edges = edges
+        self.weight_type = weight_type
+        self.weight_ratio = weight_ratio
+        self.AS_threshold = AS_threshold
+        self.AF_threshold = AF_threshold
+        self.sample_size = sample_size
+        self.graph = defaultdict(list)
+        self.weights = {}
+        self.nodes = set()
+        self.dict_node_score = defaultdict(list)
+        self.dict_edge_info = {}
+        self.filtered_edges = {}
+
+    def build(self):
+        edges_sorted = sorted(self.edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
+        for pair, values in edges_sorted:
+            u, v = pair
+            w = values[self.weight_type]
+            self.dict_node_score[u].append((w, v))
+            self.dict_node_score[v].append((w, u))
+            self.dict_edge_info[(u, v)] = values
+            self.dict_edge_info[(v, u)] = values
+
+        for node, scores in self.dict_node_score.items():
+            max_score = max(scores, key=lambda x: x[0])[0]
+            for score, neighbor in scores:
+                if score < max_score * self.weight_ratio:
+                    self.filtered_edges[(node, neighbor)] = 0
+                    self.filtered_edges[(neighbor, node)] = 0
+
+        for pair, values in edges_sorted:
+            u, v = pair
+            AF, AS, _ = values
+            w = values[self.weight_type]
+            if AS < self.AS_threshold: # filtering through AS threshold
+                self.filtered_edges[(u, v)] = w
+                self.filtered_edges[(v, u)] = w
+                continue
+            if AF <= self.AF_threshold * self.sample_size * 2: # filtering through AF threshold
+                self.filtered_edges[(u, v)] = w
+                self.filtered_edges[(v, u)] = w
+                continue
+            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges:
+                self.filtered_edges[(u, v)] = w
+                self.filtered_edges[(v, u)] = w
+                continue
+            print("\t", (u, v), values)
+            # undirected graph assignment
+            self.graph[u].append(v)
+            self.graph[v].append(u)
+            self.weights[(u, v)] = w
+            self.weights[(v, u)] = w
+            self.nodes.update([u, v])
+            self.nodes.update([v, u])
+
+        for node in self.nodes:
+            if node.endswith("_b"):
+                contig = node[:-2]
+                e_node = f"{contig}_e"
+                self.graph[node].append(e_node)
+                self.weights[(node, e_node)] = 0
+            elif node.endswith("_e"):
+                contig = node[:-2]
+                b_node = f"{contig}_b"
+                self.graph[node].append(b_node)
+                self.weights[(node, b_node)] = 0
+        return self.graph, self.weights, self.nodes, self.dict_edge_info
+
+class PathFinder:
+    def __init__(self, graph, weights, nodes):
+        self.graph = graph
+        self.weights = weights
+        self.nodes = nodes
+
+    def dfs_edge(self, results, node, visited_contigs, path, score, visited_nodes, depth=0):
+        path.append(node)
+        contig = node[:-2]
+        visited_contigs.add(contig)
+        if node.endswith("_b"):
+            opposite = f"{contig}_e"
+        else:
+            opposite = f"{contig}_b"
+        visited_nodes.add(node)
+        if opposite not in visited_nodes:
+            self.dfs_node(results, opposite, visited_contigs, path, score, visited_nodes, depth + 1)
+        else:
+            results.append((score, list(path)))
+        visited_nodes.remove(node)
+        path.pop()
+
+    def dfs_node(self, results, node, visited_contigs, path, score, visited_nodes, depth=0):
+        path.append(node)
+        contig = node[:-2]
+        visited_contigs.add(contig)
+        visited_nodes.add(node)
+        results.append((score, list(path)))
+        if self.graph.get(node):
+            for neighbor in self.graph[node]:
+                if neighbor not in visited_nodes:
+                    edge_score = self.weights[(node, neighbor)]
+                    self.dfs_edge(results, neighbor, visited_contigs, path, score + edge_score, visited_nodes, depth + 1)
+        else:
+            print(f"{'  ' * depth}dfs_node: node {node} not found in graph, it's an end node")
+        visited_nodes.remove(node)
+        path.pop()
+
+    def find_end_nodes(self):
+        set_contigs = set([node[:-2] for node in self.nodes])
+        end_nodes = set()
+        for contig in set_contigs:
+            s_node = contig + '_b'
+            e_node = contig + '_e'
+            if s_node not in self.graph:
+                end_nodes.add(s_node)
+            if e_node not in self.graph:
+                end_nodes.add(e_node)
+        return end_nodes
+    
+    # ========================= sub-functions for find_paths =========================
+    def give_start_nodes(self, edges_to_process, end_nodes, flag_exhaustive):
+        if len(end_nodes) == 0:
+            start_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_b'
+            start_e_node = '_'.join(edges_to_process[0][0][0].split("_")[:-1]) + '_e'
+            start_nodes = [start_node, start_e_node]
+        else:
+            if flag_exhaustive == False:
+                start_nodes = sorted(end_nodes, key=lambda x: int(x.split("_")[-2]))[:1]
+            else:
+                start_nodes = sorted(end_nodes, key=lambda x: int(x.split("_")[-2]))
+        return start_nodes
+    
+    def give_start_nodes_2nd_pass(self, end_nodes, flag_exhaustive):
+        if len(end_nodes) == 0:
+            return []
+        else:
+            if flag_exhaustive == False:
+                start_nodes = sorted(end_nodes, key=lambda x: int(x.split("_")[-2]))[:1]
+            else:
+                start_nodes = sorted(end_nodes, key=lambda x: int(x.split("_")[-2]))
+        return start_nodes
+    
+    def find_candidate_paths(self, results, end_nodes):
+        dict_candidate_paths = defaultdict(list)
+        top_results = sorted(results, key=lambda x: -x[0])
+        max_score = top_results[0][0]
+        for score, path in top_results:
+            terminal_node = path[-1]
+            if terminal_node in end_nodes:
+                dict_candidate_paths[terminal_node].append((score, path))
+            elif score >= max_score:
+                dict_candidate_paths["longest"].append((score, path))
+        dict_trimmed_paths = defaultdict(list)
+        for terminal_node, paths in dict_candidate_paths.items():
+            if terminal_node == "longest":
+                dict_trimmed_paths[terminal_node] = paths
+            else:
+                sorted_paths = sorted(paths, key=lambda x: -x[0])
+                for path in sorted_paths:
+                    if path[0] >= sorted_paths[0][0]:
+                        dict_trimmed_paths[terminal_node].append(path)
+                    else:
+                        break
+        return dict_trimmed_paths
+    # =================================================================================
+
+    def search_paths(self, final_results, current_path, visited_contigs, visited_nodes, edges_sorted, end_nodes, flag_exhaustive, second_pass=False):
+        new_edges_sorted = [edge for edge in edges_sorted if edge[0][0] not in visited_nodes and edge[0][1] not in visited_nodes]
+        #if len(new_edges_sorted) == 0:
+        #    final_results.append(current_path)
+        #    print("......"*20, "Empty edges found!")
+        #    return final_results
+        if second_pass:
+            start_nodes = self.give_start_nodes_2nd_pass(end_nodes, flag_exhaustive)
+        else:
+            start_nodes = self.give_start_nodes(new_edges_sorted, end_nodes, flag_exhaustive)
+        #print(f"visited_nodes: {visited_nodes}")
+        #print(f"[0]: {start_nodes[0]}")
+        if start_nodes[0] in visited_nodes:
+            final_results.append(current_path)
+            #print("......"*20, "Duplicate start node found!")
+            return final_results
+        
+        for idx, start_node in enumerate(start_nodes):
+            results = []
+            nodes = self.nodes
+            #print("Remaining contigs number: ", len(nodes - visited_nodes))
+            print(f"Starting DFS from {start_node}")
+            self.dfs_edge(results, start_node, visited_contigs.copy(), [], 0, visited_nodes)
+            # choose the longest path with the highest score or the path stop with end-nodes
+            dict_candidate_paths = self.find_candidate_paths(results, end_nodes)
+            #for terminal_node, paths in dict_candidate_paths.items():
+            #    print(f"terminal_node: {terminal_node}")
+            #    for path in paths:
+            #        print(f"path: {path}")
+            #print("--------------------------------------------------"*2)
+            for idy, (terminal_node, paths) in enumerate(dict_candidate_paths.items()):
+                for idz, path in enumerate(sorted(paths, key=lambda x: -x[0])):
+                    #print(idx, idy, idz, terminal_node, path)
+                    contig_in_path = set([node[:-2] for node in path[1]])
+                    set_visited_contigs = visited_contigs.union(contig_in_path)
+                    set_visited_nodes = set()
+                    for visited_contig in set_visited_contigs:
+                        set_visited_nodes.update([visited_contig + '_b', visited_contig + '_e'])
+
+                    remaining_edges = [edge for edge in edges_sorted if edge[0][0] not in set_visited_nodes and edge[0][1] not in set_visited_nodes]
+                    if len(nodes - set_visited_nodes) == 0 or len(remaining_edges) == 0:
+                        final_results.append(current_path + [path])
+                        #print("......"*20, "Final result found!")
+                        #return final_results
+                    else:
+                        new_end_nodes = end_nodes - set_visited_nodes
+                        #print(f"nodes - set_visited_nodes: {nodes - set_visited_nodes}")
+                        #print(f"new_end_nodes: {new_end_nodes}")
+                        #print(f"path: {path}")
+                        self.search_paths(final_results, current_path + [path], set_visited_contigs, set_visited_nodes, edges_sorted, new_end_nodes, flag_exhaustive)
+
+        return final_results
+
+    def search_paths_2nd_pass(self, final_results, current_path, visited_contigs, visited_nodes, edges_sorted, end_nodes, flag_exhaustive, second_pass=True):
+        new_edges_sorted = [edge for edge in edges_sorted if edge[0][0] not in visited_nodes and edge[0][1] not in visited_nodes]
+        if second_pass:
+            start_nodes = self.give_start_nodes_2nd_pass(end_nodes, flag_exhaustive)
+        else:
+            start_nodes = self.give_start_nodes(new_edges_sorted, end_nodes, flag_exhaustive)
+        if len(start_nodes) == 0 or start_nodes[0] in visited_nodes:
+            final_results.append(current_path)
+            #print("......"*20, "Duplicate start node found!")
+            return final_results
+        
+        for idx, start_node in enumerate(start_nodes):
+            results = []
+            nodes = self.nodes
+            #print("Remaining contigs number: ", len(nodes - visited_nodes))
+            print(f"Starting DFS from {start_node}")
+            self.dfs_edge(results, start_node, visited_contigs.copy(), [], 0, visited_nodes)
+            # choose the longest path with the highest score or the path stop with end-nodes
+            dict_candidate_paths = self.find_candidate_paths(results, end_nodes)
+            #for terminal_node, paths in dict_candidate_paths.items():
+            #    print(f"terminal_node: {terminal_node}")
+            #    for path in paths:
+            #        print(f"path: {path}")
+            #print("--------------------------------------------------"*2)
+            for idy, (terminal_node, paths) in enumerate(dict_candidate_paths.items()):
+                for idz, path in enumerate(sorted(paths, key=lambda x: -x[0])):
+                    print(idx, idy, idz, terminal_node, path)
+                    contig_in_path = set([node[:-2] for node in path[1]])
+                    set_visited_contigs = visited_contigs.union(contig_in_path)
+                    set_visited_nodes = set()
+                    for visited_contig in set_visited_contigs:
+                        set_visited_nodes.update([visited_contig + '_b', visited_contig + '_e'])
+
+                    remaining_edges = [edge for edge in edges_sorted if edge[0][0] not in set_visited_nodes and edge[0][1] not in set_visited_nodes]
+                    if len(nodes - set_visited_nodes) == 0 or len(remaining_edges) == 0:
+                        final_results.append(current_path + [path])
+                        print("......"*20, "Final result found!")
+                        return final_results
+                    else:
+                        new_end_nodes = end_nodes - set_visited_nodes
+                        #print(f"nodes - set_visited_nodes: {nodes - set_visited_nodes}")
+                        #print(f"new_end_nodes: {new_end_nodes}")
+                        #print(f"path: {path}")
+                        self.search_paths_2nd_pass(final_results, current_path + [path], set_visited_contigs, set_visited_nodes, edges_sorted, new_end_nodes, flag_exhaustive)
+
+        return final_results
+    
+    def standardize_traversals(self, paths, end_nodes):
+        new_paths = []
+        total_score = 0
+        non_end_node_count = 0
+        dangling_contig_count = 0
+        for score, path in sorted(paths, key=lambda x: (-x[0], x[1])):
+            total_score += score
+            if len(path) <= 2:
+                dangling_contig_count += 1
+            else:
+                if path[-1] not in end_nodes:
+                    non_end_node_count += 1
+                if path[0] not in end_nodes:
+                    non_end_node_count += 1
+            # check the orientation of the path
+            if int(path[-1].split("_")[-2]) > int(path[0].split("_")[-2]):
+                new_paths.append((score, tuple(path)))
+            else:
+                new_paths.append((score, tuple(path[::-1])))
+        new_paths = sorted(new_paths, key=lambda x: int(x[1][0].split("_")[-2]))
+        return (total_score, non_end_node_count, dangling_contig_count, tuple(new_paths))
+
+    def second_pass_merge(self, paths, possible_connections):
+        # Build mapping from end nodes to component indices
+        end_to_idx = {}
+        for idx, path in enumerate(paths):
+            end_to_idx[path[1][0]] = idx  # start
+            end_to_idx[path[1][-1]] = idx  # end
+
+        # Build adjacency list for connections
+        adj = defaultdict(list)
+        in_degree = defaultdict(int)
+        print("possible_connections: ", sorted(possible_connections, key=lambda x: (x[0], x[1])))
+        for idx, idj, (from_node, to_node) in sorted(possible_connections, key=lambda x: (x[0], x[1])):
+            adj[idx].append((idj, from_node, to_node))
+            in_degree[idj] += 1
+
+        # Find starting components (those not pointed to by any connection)
+        start_indices = [i for i in range(len(paths)) if in_degree[i] == 0]
+
+        merged_paths = []
+        merged_indices = []
+        visited = set()
+
+        for start in start_indices:
+            if start in visited:
+                continue
+            current = start
+            merged = list(paths[current][1])
+            component_indices = [current]
+            visited.add(current)
+            while adj[current]:
+                next_idx, from_node, to_node = adj[current][0]  # assuming only one connection for simplicity
+                # Insert the connecting edge
+                merged.extend(paths[next_idx][1])
+                component_indices.append(next_idx)
+                visited.add(next_idx)
+                current = next_idx
+            merged_paths.append(tuple(merged))
+            merged_indices.append(tuple(component_indices))
+
+        # Add any unvisited components (not connected to anything)
+        for i in range(len(paths)):
+            if i not in visited:
+                merged_paths.append(paths[i][1])
+                merged_indices.append((i,))
+
+        return merged_indices, merged_paths
+
+
+    def build_second_pass_graph(self, first_stage_results, filtered_edges, original_edges):
+        """
+        Build a new graph for second pass that includes:
+        1. All filtered edges that were discarded in first pass
+        2. All nodes from first stage results
+        3. New connections between first stage paths
+        """
+        # Extract all contigs used in first stage
+        first_stage_contigs = set()
+        for score, non_end_node_count, dangling_contig_count, paths in first_stage_results:
+            for path_score, path in paths:
+                for node in path:
+                    contig = node[:-2]  # Remove _b or _e suffix
+                    first_stage_contigs.add(contig)
+        
+        print(f"First stage used contigs: {len(first_stage_contigs)}")
+        
+        # Build new graph with filtered edges
+        second_pass_graph = defaultdict(list)
+        second_pass_weights = {}
+        second_pass_nodes = set()
+        
+        # Add connections between first stage path endpoints
+        alias_map = {}
+        alias_back_map = {}
+        first_stage_end_nodes = set()
+        score, non_end_node_count, dangling_contig_count, paths = first_stage_results[0]
+        for path_score, path in paths:
+            if len(path) >= 2:
+                start_node = path[0]
+                end_node = path[-1]
+                first_stage_end_nodes.add(start_node)
+                first_stage_end_nodes.add(end_node)
+                # assign alias node for the end node
+                if start_node.endswith("_b"):
+                    alias_node = start_node[:-2] + "_e"
+                else:
+                    alias_node = start_node[:-2] + "_b"
+                alias_map[end_node] = alias_node
+                alias_back_map[(start_node, alias_node)] = (path)
+                alias_back_map[(alias_node, start_node)] = (path[::-1])
+                # Add virtual edge between path endpoints with high weight
+                virtual_weight = path_score * 2  # Give high priority to these connections
+                second_pass_graph[start_node].append(alias_node)
+                second_pass_graph[alias_node].append(start_node)
+                second_pass_weights[(start_node, alias_node)] = virtual_weight
+                second_pass_weights[(alias_node, start_node)] = virtual_weight
+                second_pass_nodes.update([start_node, alias_node])
+
+        print(f"First stage end nodes: {sorted(list(first_stage_end_nodes))}")
+        print(f"Alias map: {alias_map}")
+        
+        # Add all filtered edges to the new graph
+        for edge in filtered_edges:
+            u, v = edge
+            if u not in first_stage_end_nodes and v not in first_stage_end_nodes:
+                if u[:-2] in first_stage_contigs or v[:-2] in first_stage_contigs:
+                    continue
+            # Get weight from the original edges if available
+            if edge in original_edges:
+                weight = original_edges[edge][1]  # Use the weight value directly
+                # replace u, v with the alias name if exists
+                if alias_map.get(u):
+                    u = alias_map[u]
+                if alias_map.get(v):
+                    v = alias_map[v]
+                second_pass_graph[u].append(v)
+                second_pass_graph[v].append(u)
+                second_pass_weights[(u, v)] = weight
+                second_pass_weights[(v, u)] = weight
+                second_pass_nodes.update([u, v])
+
+        # Add the _b to _e connections for all contigs
+        for node in second_pass_nodes:
+            if node.endswith("_b"):
+                contig = node[:-2]
+                e_node = f"{contig}_e"
+                if e_node in second_pass_nodes:
+                    second_pass_graph[node].append(e_node)
+                    second_pass_weights[(node, e_node)] = 0
+            elif node.endswith("_e"):
+                contig = node[:-2]
+                b_node = f"{contig}_b"
+                if b_node in second_pass_nodes:
+                    second_pass_graph[node].append(b_node)
+                    second_pass_weights[(node, b_node)] = 0
+        starting_nodes = set()
+        for node in first_stage_end_nodes:
+            if node in alias_map:
+                starting_nodes.add(alias_map[node])
+            else:
+                starting_nodes.add(node)
+
+        return second_pass_graph, second_pass_weights, second_pass_nodes, alias_back_map, starting_nodes
+
+    def second_pass_connection(self, sorted_standardized_result, filtered_edges):
+        print("filtered_edges: ", sorted(filtered_edges.items(), key=lambda x: (x[0][0], x[0][1])))
+        second_pass_result = []
+        
+        # Get the original edges from the main graph
+        original_edges = {}
+        for edge, weight in filtered_edges.items():
+            original_edges[edge] = [0, weight, 'unknown']
+        
+        print(f"Found {len(original_edges)} filtered edges with weight information")
+        
+        # Build second pass graph
+        second_pass_graph, second_pass_weights, second_pass_nodes, alias_back_map, starting_nodes = self.build_second_pass_graph(
+            sorted_standardized_result, filtered_edges, original_edges
+        )
+        
+        print(f"Second pass graph built with {len(second_pass_nodes)} nodes and {len(second_pass_weights)//2} edges")
+        for ele in second_pass_nodes:
+            #print(ele, second_pass_graph[ele])
+            print(ele, len(second_pass_graph[ele]), second_pass_graph[ele][-1])
+        # Create new PathFinder for second pass
+        
+        second_pass_finder = PathFinder(second_pass_graph, second_pass_weights, second_pass_nodes)
+        
+        # Find end nodes for second pass (nodes that are not connected to anything else)
+        """
+        second_pass_end_nodes = second_pass_finder.find_end_nodes()
+        print(f"Second pass end nodes: {second_pass_end_nodes}")
+        warped_second_pass_end_nodes = set()
+        for ele in second_pass_end_nodes:
+            if ele.endswith("_b"):
+                warped_second_pass_end_nodes.add(ele[:-2] + "_e")
+            elif ele.endswith("_e"):
+                warped_second_pass_end_nodes.add(ele[:-2] + "_b")
+        """
+        
+        # Convert filtered edges to edges_sorted format
+        second_pass_edges = []
+        for edge in filtered_edges:
+            if edge in second_pass_weights:
+                second_pass_edges.append((edge, [0, second_pass_weights[edge], 'unknown']))
+        
+        # Run search_paths on the second pass graph
+        print("Running search_paths on second pass graph...")
+        second_pass_results = second_pass_finder.search_paths_2nd_pass(
+            [], [], set(), set(), second_pass_edges, starting_nodes, False, second_pass=True
+        )
+        
+        print(f"Second pass found {len(second_pass_results)} path sets")
+        
+        # Process second pass results
+        for path_set in second_pass_results:
+            standardized_path_set = second_pass_finder.standardize_traversals(path_set, starting_nodes)
+            second_pass_result.append(standardized_path_set)
+        
+        #print("second_pass_results: ", second_pass_results)
+        # decompress the second pass results
+        decompressed_second_pass_results = []
+        for path_set in second_pass_result:
+            print("path_set: ", path_set)
+            score, non_end_node_count, dangling_contig_count, paths = path_set
+            for path_info in paths:
+                path_score, path = path_info
+                decompressed_path = path
+                for idx in range(len(path)-1, 0, -2):
+                    print(idx-1, idx)
+                    if (path[idx-1], path[idx]) in alias_back_map:
+                        #print(alias_back_map[(path[idx-1], path[idx])])
+                        decompressed_path = decompressed_path[:idx-1] + alias_back_map[(path[idx-1], path[idx])] + decompressed_path[idx+1:]
+                decompressed_second_pass_results.append((score, non_end_node_count, dangling_contig_count, (path_score, decompressed_path)))
+                
+        #print("decompressed_second_pass_results: ", decompressed_second_pass_results)
+
+        # If no second pass results, fall back to original merging approach
+        if not second_pass_result:
+            print("No second pass results found, falling back to original merging approach")
+            return self._original_second_pass_connection(sorted_standardized_result, filtered_edges)
+        
+        return decompressed_second_pass_results
+
+    def _original_second_pass_connection(self, sorted_standardized_result, filtered_edges):
+        """
+        Original second pass implementation for fallback
+        """
+        print("filtered_edges: ", sorted(filtered_edges))
+        second_pass_result = []
+        for score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result:
+            end_nodes = []
+            for path_info in paths:
+                _, path = path_info
+                end_nodes.append((path[0], path[-1]))
+
+            possible_connections = set()
+            for idx, (end_node_b, end_node_e) in enumerate(end_nodes):
+                for idj in range(idx+1, len(end_nodes)):
+                    (end_node_b_2, end_node_e_2) = end_nodes[idj]
+                    if end_node_b not in (end_node_b_2, end_node_e_2) and end_node_e not in (end_node_b_2, end_node_e_2):
+                        if (end_node_e, end_node_b_2) in filtered_edges:
+                            possible_connections.add((idx, idj, (end_node_e, end_node_b_2)))
+            
+            merged_indices, merged_paths = self.second_pass_merge(paths, possible_connections)
+            print("Merged paths: ", merged_paths)
+            print("Candidate connections: ", possible_connections)
+            print("--------------------------------"*2)
+            new_dangling_contig_count = 0
+            for new_path in merged_paths:
+                if len(new_path) <= 2:
+                    new_dangling_contig_count += 1
+            new_paths = []
+            for idx, path in enumerate(merged_paths):
+                new_score = sum(paths[idy][0] for idy in merged_indices[idx])
+                new_paths.append((new_score, tuple(path)))
+            second_pass_result.append((score, non_end_node_count, new_dangling_contig_count, tuple(new_paths)))
+        return second_pass_result
+
+                    
+        
+
+class AGPAssembler:
+    def __init__(self, agp_dir):
+        self.agp_dir = agp_dir
+
+    def find_connection_segments_in_agp(self, agp_path, start_node, end_node) -> tuple[list[dict], bool]:
+        def parse_node(node):
+            if node.endswith('_b'):
+                return node[:-2], 'b'
+            elif node.endswith('_e'):
+                return node[:-2], 'e'
+            else:
+                return node, None
+            
+        def check_orientation(strand_s, strand_e, start_end, end_end, flag_forward):
+            start_match = end_match = False
+            if flag_forward == False:
+                strand_s *= -1
+                strand_e *= -1
+            if (start_end == 'e' and strand_s == 1) or (start_end == 'b' and strand_s == -1):
+                start_match = True
+            if (end_end == 'b' and strand_e == 1) or (end_end == 'e' and strand_e == -1):
+                end_match = True
+            return start_match and end_match
+        
+        start_contig, start_end = parse_node(start_node)
+        end_contig, end_end = parse_node(end_node)
+        agp_entries = read_agp_file(agp_path)
+        start_indices = [i for i, l in enumerate(agp_entries) if l['component_id'] == start_contig]
+        end_indices = [i for i, l in enumerate(agp_entries) if l['component_id'] == end_contig]
+        if not start_indices or not end_indices:
+            print("No valid node found!!")
+            return [], False
+        candidate_pairs = []
+        for s in start_indices:
+            for e in end_indices:
+                if abs(e - s) <= 2:
+                    candidate_pairs.append((s, e))
+        if len(candidate_pairs) == 0:
+            print("No valid candidate pairs found!!")
+            return [], False
+        for s, e in candidate_pairs:
+            strand_s = 1 if agp_entries[s]['orientation'] == '+' else -1
+            strand_e = 1 if agp_entries[e]['orientation'] == '+' else -1
+            if s <= e:
+                if check_orientation(strand_s, strand_e, start_end, end_end, True):
+                    return agp_entries[s:e+1], True
+            else:
+                if check_orientation(strand_s, strand_e, start_end, end_end, False):
+                    return agp_entries[e:s+1], False
+        print("No valid connection found!!")
+        return [], False
+
+    def extract_and_merge(self, path, dict_edge_info, agp_path):
+        all_segments = []
+        for idx in range(1, len(path)-1, 2):
+            u, v = path[idx], path[idx+1]
+            edge_info = dict_edge_info[(u, v)]
+            sample = edge_info[2]
+            agp_file = agp_path + f"{sample}.agp"
+            print(f"AGP connection for {u} -> {v} in sample {sample}:")
+            segments, flag_forward = self.find_connection_segments_in_agp(agp_file, u, v)
+            if segments:
+                if not flag_forward:
+                    segments = reverse_segments(segments)
+                updated_segments = merge_segments(all_segments, segments)
+                if updated_segments:
+                    all_segments = updated_segments
+                else:
+                    print("Fail to merge segments")
+                    continue
+        return all_segments
+    
+class SequenceCollector:
+    def __init__(self, ref_path):
+        self.ref_path = ref_path
+    
+    def collect(self, relevant_ref_ids, contig_fasta_path, output_path):
+        list_files = [self.ref_path + id + ".fasta" for id in relevant_ref_ids]
+        with open(output_path + ".relevant_seq.fasta", "w") as out_f:
+            for fasta in [contig_fasta_path] + list_files:
+                with open(fasta, "r") as in_f:
+                    content = in_f.read()
+                    out_f.write(content)
+                    if not content.endswith('\n'):
+                        out_f.write('\n')
+        return output_path + ".relevant_seq.fasta"
+    
+def output_agp(components, contig_fasta_path, output_path):
+    pragma_line = f"## agp-version {get_ragtag_version()}"
+    comment_line = f"# AGP created by impuT2T {get_impuT2T_version()}"
+
+    used_contigs = set()
+    contig_lengths = {}
+    contig_order = []
+    fai = pysam.FastaFile(contig_fasta_path)
+    contig_order = list(fai.references)
+    contig_lengths = {name: fai.get_reference_length(name) for name in contig_order}
+    fai.close()
+    
+    # Create a mapping from first component to component index
+    # Create a list of all items to output, sorted by their first contig's position in FASTA
+    output_items = []
+    component_first_contig = {}
+    component_idx = 0
+    for component in components:
+        if component:
+            first_contig = component[0]['component_id']
+            output_items.append(('patch', component_idx, component, first_contig))
+            component_first_contig[first_contig] = component_idx
+            for segment in component:
+                used_contigs.add(segment['component_id'])
+            component_idx += 1
+    
+    # Add unplaced contigs
+    for contig in contig_order:
+        if contig not in used_contigs:
+            output_items.append(('unplaced', contig, None, contig))
+    
+    # Sort by position in FASTA order
+    contig_to_position = {contig: idx for idx, contig in enumerate(contig_order)}
+    output_items.sort(key=lambda x: contig_to_position.get(x[3], float('inf')))
+    
+    with open(output_path + '.agp', 'w') as f:
+        f.write(pragma_line + '\n')
+        f.write(comment_line + '\n')
+        for item_type, item_id, component, first_contig in output_items:
+            if item_type == 'patch':
+                object = 'patch' + "{0:08}".format(item_id)
+                print(f"idx: {item_id}, Object: {object}, component length: {len(component)}")
+                for segment in component:
+                    f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"
+                       f"{segment['part_num']}\t{segment['component_type']}\t{segment['component_id']}\t"
+                       f"{segment['component_beg']}\t{segment['component_end']}\t{segment['orientation']}\n")
+            else:  # unplaced
+                f.write(f"{item_id}\t1\t{contig_lengths[item_id]}\t1\tW\t{item_id}\t1\t{contig_lengths[item_id]}\t+\n")
+
+
+def main():
+    parser = argparse.ArgumentParser("impuT2T patching version: " + get_impuT2T_version())
+    parser.add_argument("-p", "--path", required=True, help="Input path")
+    parser.add_argument("-l", "--list_sample", required=True, help="file containing list of samples")
+    parser.add_argument("-w", "--weight", help="weight type: allele_freq or max_alignment_score [AF|AS]", default="AS")
+    parser.add_argument("-wr", "--weight_ratio", help="weight ratio, discard the edge less than ratio of the max weight the same node [0.7]", type=float, default=0.7)
+    parser.add_argument("-ast", "--AS_threshold", help="AS threshold, discard the edge less than threshold [6000]", type=int, default=6000)
+    parser.add_argument("-aft", "--AF_threshold", help="AF threshold, discard the edge less than threshold [0.005]", type=float, default=0.005)
+    parser.add_argument("--debug", help="debug mode", action="store_true")
+    parser.add_argument("--contig_fasta", required=True, help="contig fasta file, needed for unplaced contigs")
+    parser.add_argument("--ref_path", help="reference path, only specify if you want the patch fasta output")
+    parser.add_argument("--second_pass", help="second pass connection", action="store_true")
+    parser.add_argument("--gmm", help="use gmm for edges selection", action="store_true")
+    parser.add_argument("-o", "--output", help="output path", default="patch.result")
+    args = parser.parse_args()
+
+    # Collect edges from all samples
+    if args.weight == "AF":
+        weight_type = 0
+    elif args.weight == "AS":
+        weight_type = 1
+    else:
+        raise ValueError(f"Invalid weight type: {args.weight}")
+
+    samples = parse_sample_list(args.list_sample)
+
+    edge_aggregator = EdgeAggregator(args.path, samples, args.gmm)
+    edges = edge_aggregator.aggregate()
+    if args.debug:
+        for pair, values in sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2])):
+            print(pair, values)
+
+    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, len(samples))
+    graph, weights, nodes, dict_edge_info = graph_builder.build()
+    edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
+    print("graph", "--------------------------------"*2)
+    for ele in graph:
+        print(ele, graph[ele])
+    print("--------------------------------"*2)
+
+    path_finder = PathFinder(graph, weights, nodes)
+    end_nodes = path_finder.find_end_nodes()
+    print("================================================"*2)
+    print("End nodes: ", end_nodes)
+    print("================================================"*2)
+    test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, end_nodes, True)
+    print("TEST_RESULTS", "########################"*2)
+    print("TEST_RESULTS", "########################"*2)
+    print("TEST_RESULTS", "########################"*2)
+    print("TEST_RESULTS", "########################"*2)
+    standardized_result = set()
+    for ele in test_results:
+        standardized_result.add(path_finder.standardize_traversals(ele, end_nodes))
+    sorted_standardized_result = sorted(list(standardized_result), key=lambda x: -x[0])
+    for ele in sorted_standardized_result:
+        print(ele)
+    
+    if args.second_pass:
+        print("Try connecting with filtered connections in the first pass")
+        second_pass_results = path_finder.second_pass_connection(sorted_standardized_result, graph_builder.filtered_edges)
+        print("SECOND_PASS_RESULTS", "########################"*2)
+        print("SECOND_PASS_RESULTS", "########################"*2)
+        for ele in second_pass_results:
+            print(ele)
+        sorted_standardized_result = second_pass_results
+    
+    components = []
+    agp_assembler = AGPAssembler(args.path)
+    total_score_1st, non_end_node_count_1st, dangling_contig_count_1st, paths = sorted_standardized_result[0]
+    #print(paths)
+    for score, path in paths:
+        print(f"Total Score: {total_score_1st}, Score: {score}, Path: {path}")
+        print(f"Path length: {len(path)}")
+        all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+        print("***********", len(all_segments), len(path), path)
+        if args.debug:
+            print('--------------------------------'*3)
+            for seg in all_segments:
+                print('\t'.join([str(v) for v in seg.values()]))
+        components.append(all_segments)
+    # get the alternative components if other components has higher score, lower number of non-end nodes or dangling contigs
+    alt_components = []
+    for total_score, non_end_node_count, dangling_contig_count, paths in sorted_standardized_result[1:]:
+        alt_component = []
+        if total_score >= total_score_1st or non_end_node_count < non_end_node_count_1st or dangling_contig_count < dangling_contig_count_1st:
+            print("Alternative component found!")
+            for score, path in paths:
+                print(f"Total Score: {total_score}, Score: {score}, Path: {path}")
+                print(f"Path length: {len(path)}")
+                all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+                print("***********", len(all_segments), len(path), path)
+                alt_component.append(all_segments)
+        if alt_component:
+            alt_components.append(alt_component)
+
+    # Assemble components into a single AGP file
+    output_agp(components, args.contig_fasta, args.output)
+    for idx, alt_component in enumerate(alt_components):
+        output_agp(alt_component, args.contig_fasta, args.output + f".alt_{idx}")
+
+    if args.ref_path:
+        relevant_samples = set()
+        for component in components:
+            for segment in component:
+                if segment['component_id'].split("_")[0] in samples:
+                    relevant_samples.add(segment['component_id'].split("_")[0])
+        relevant_samples = sorted(list(relevant_samples))
+        
+        print(f"Relevant samples: {relevant_samples}")
+        print(f"Relevant sequences saved to {args.output}.relevant_seq.fasta...")
+        sequence_collector = SequenceCollector(args.ref_path)
+        sequence_collector.collect(relevant_samples, args.contig_fasta, args.output)
+        cmd = [
+            "./ragtag_agp2fa.py",
+            args.output + ".agp",
+            args.output + ".relevant_seq.fasta"
+        ]
+        run_oae(cmd, args.output + ".patch.fasta", "test.log")
+    
+
+if __name__ == "__main__":
+    main()

@@ -77,7 +77,7 @@ class EdgeAggregator:
                         candidate_samples = []
                         for idx in range(len(dists)):
                             upper_bound = mean + 1.5*std
-                            lower_bound = mean - 1.5*std if mean - 1.5*std > 0 else mean - std
+                            lower_bound = mean - 1.5*std if mean - 1.5*std > 0 and mean > 0 else mean - std
                             if dists[idx] <= upper_bound and dists[idx] >= lower_bound:
                                 candidate_dists.append(dists[idx])
                                 candidate_scores.append(scores[idx])
@@ -99,7 +99,7 @@ class EdgeAggregator:
         return self.edges
 
 class GraphBuilder:
-    def __init__(self, edges, weight_type, weight_ratio, AS_threshold, AF_threshold, sample_size):
+    def __init__(self, edges, weight_type, weight_ratio, AS_threshold, AF_threshold, contig_fasta, sample_size):
         self.edges = edges
         self.weight_type = weight_type
         self.weight_ratio = weight_ratio
@@ -112,6 +112,8 @@ class GraphBuilder:
         self.dict_node_score = defaultdict(list)
         self.dict_edge_info = {}
         self.filtered_edges = set()
+        fai = pysam.FastaFile(contig_fasta)
+        self.contig_lengths = {contig: fai.get_reference_length(contig) for contig in fai.references}
 
     def build(self):
         edges_sorted = sorted(self.edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
@@ -167,12 +169,16 @@ class GraphBuilder:
                 contig = node[:-2]
                 e_node = f"{contig}_e"
                 self.graph[node].append(e_node)
-                self.weights[(node, e_node)] = 0
             elif node.endswith("_e"):
                 contig = node[:-2]
                 b_node = f"{contig}_b"
                 self.graph[node].append(b_node)
-                self.weights[(node, b_node)] = 0
+        
+        for contig in self.contig_lengths:
+            b_node = f"{contig}_b"
+            e_node = f"{contig}_e"
+            self.weights[(b_node, e_node)] = self.contig_lengths[contig]/10
+            self.weights[(e_node, b_node)] = self.contig_lengths[contig]/10
         return self.graph, self.weights, self.nodes, self.dict_edge_info
 
 class PathFinder:
@@ -183,17 +189,19 @@ class PathFinder:
 
     def dfs_edge(self, results, node, visited_contigs, path, score, visited_nodes, depth=0):
         path.append(node)
+        print(f"{'-|' * depth}dfs_edge: node {node}")
         contig = node[:-2]
         visited_contigs.add(contig)
         if node.endswith("_b"):
             opposite = f"{contig}_e"
         else:
             opposite = f"{contig}_b"
+        node_score = self.weights[(node, opposite)]
         visited_nodes.add(node)
         if opposite not in visited_nodes:
-            self.dfs_node(results, opposite, visited_contigs, path, score, visited_nodes, depth + 1)
+            self.dfs_node(results, opposite, visited_contigs, path, score + node_score, visited_nodes, depth + 1)
         else:
-            results.append((score, list(path)))
+            results.append((score + node_score, list(path)))
         visited_nodes.remove(node)
         path.pop()
 
@@ -269,8 +277,10 @@ class PathFinder:
         #    print("......"*20, "Empty edges found!")
         #    return final_results
         start_nodes = self.give_start_nodes(new_edges_sorted, end_nodes, flag_exhaustive)
+        #print(f"end_nodes: {end_nodes}")
+        #print(f"new_edges_sorted: {new_edges_sorted}")
         #print(f"visited_nodes: {visited_nodes}")
-        #print(f"[0]: {start_nodes[0]}")
+        print(f"[0]: {start_nodes[0]}")
         if start_nodes[0] in visited_nodes:
             final_results.append(current_path)
             #print("......"*20, "Duplicate start node found!")
@@ -279,8 +289,9 @@ class PathFinder:
         for idx, start_node in enumerate(start_nodes):
             results = []
             nodes = self.nodes
-            #print("Remaining contigs number: ", len(nodes - visited_nodes))
-            print(f"Starting DFS from {start_node}")
+            print("Remaining contigs number: ", len(nodes - visited_nodes))
+            #print("Remaining contigs number: ", nodes - visited_nodes)
+            #print(f"Starting DFS from {start_node}")
             self.dfs_edge(results, start_node, visited_contigs.copy(), [], 0, visited_nodes)
             # choose the longest path with the highest score or the path stop with end-nodes
             dict_candidate_paths = self.find_candidate_paths(results, end_nodes)
@@ -288,10 +299,10 @@ class PathFinder:
             #    print(f"terminal_node: {terminal_node}")
             #    for path in paths:
             #        print(f"path: {path}")
-            #print("--------------------------------------------------"*2)
+            print("--------------------------------------------------"*2)
             for idy, (terminal_node, paths) in enumerate(dict_candidate_paths.items()):
                 for idz, path in enumerate(sorted(paths, key=lambda x: -x[0])):
-                    #print(idx, idy, idz, terminal_node, path)
+                    print(idx, idy, idz, terminal_node, path)
                     contig_in_path = set([node[:-2] for node in path[1]])
                     set_visited_contigs = visited_contigs.union(contig_in_path)
                     set_visited_nodes = set()
@@ -681,12 +692,18 @@ def main():
         for pair, values in sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2])):
             print(pair, values)
 
-    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, len(samples))
+    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
     graph, weights, nodes, dict_edge_info = graph_builder.build()
     edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
     print("graph", "--------------------------------"*2)
     for ele in graph:
         print(ele, graph[ele])
+    print("--------------------------------"*2)
+    for ele in weights:
+        print("weights", ele, weights[ele])
+    print("--------------------------------"*2)
+    for ele in edges_sorted:
+        print(ele)
     print("--------------------------------"*2)
 
     path_finder = PathFinder(graph, weights, nodes)

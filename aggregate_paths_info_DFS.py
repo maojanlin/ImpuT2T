@@ -296,6 +296,24 @@ class GraphBuilder_2nd_pass:
             self.weights[(e_node, b_node)] = self.contig_lengths[contig]/10
         return self.graph, self.weights, self.nodes, self.dict_edge_info
 
+    def recover_unused_components(self, results):
+        updated_results = [] # counterpart of traversals
+        print(results)
+        for traversal in results:
+            path_info = traversal[3]
+            set_used_contigs = set()
+            updated_components = []
+            for component in path_info:
+                set_used_contigs.update(node[:-2] for node in component[1])
+                updated_components.append(component)
+            for component_contig in self.dict_compressed_2_component.keys():
+                if component_contig not in set_used_contigs:
+                    print(f"component_contig: {component_contig} {self.weights[(f'{component_contig}_b', f'{component_contig}_e')]}")
+                    edge_info = (f'{component_contig}_b', f'{component_contig}_e')
+                    updated_components.append((self.weights[edge_info], edge_info))
+            updated_results.append(tuple([traversal[0], traversal[1], traversal[2], tuple(updated_components)]))
+        return updated_results
+
     def decompress_path(self, path):
         new_path = []
         idx = 0
@@ -881,6 +899,9 @@ def main():
         for ele in dict_edge_info_2nd:
             print("dict_edge_info_2nd", ele, dict_edge_info_2nd[ele])
         print("--------------------------------"*2)
+        for ele in nodes_2nd:
+            print("nodes_2nd", nodes_2nd)
+        print("--------------------------------"*2)
 
         path_finder_2nd = PathFinder(graph_2nd, weights_2nd, nodes_2nd)
         end_nodes_2nd = path_finder_2nd.find_end_nodes()
@@ -901,8 +922,11 @@ def main():
             for ele in second_pass_results:
                 standardized_result_2nd.add(path_finder_2nd.standardize_traversals(ele, end_nodes_2nd))
             sorted_standardized_result_2nd = sorted(list(standardized_result_2nd), key=lambda x: -x[0])
+
+            recover_components = graph_builder_2nd.recover_unused_components(sorted_standardized_result_2nd)
+            print("Recover components: ", recover_components)
             decompressed_result_2nd = []
-            for ele in sorted_standardized_result_2nd:
+            for ele in recover_components:
                 total_score, non_end_node_count, dangling_contig_count, paths = ele
                 print(type(paths))
                 new_paths = []

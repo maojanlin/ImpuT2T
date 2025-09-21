@@ -172,11 +172,11 @@ def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINA
                     overlaps_right_terminal = False
             else:
                 if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_ends[i])):
-                    overlaps_right_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
+                    overlaps_right_terminal = als.ref_starts[i] < als.ref_lens[i] * (TERMINAL_RATIO)
                 else:
                     overlaps_right_terminal = False
                 if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_starts[i])):
-                    overlaps_left_terminal = als.ref_starts[i] < als.ref_lens[i] * TERMINAL_RATIO
+                    overlaps_left_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
                 else:
                     overlaps_left_terminal = False
             
@@ -1086,6 +1086,7 @@ def main():
             my_query_end = als.query_ends[idx_l] + my_query_end_offset
             their_query_start = als.query_starts[idx_r] - their_query_start_offset
             overlap = my_query_end - their_query_start
+            print("my_query_end, their_query_start, distance", my_query_end, their_query_start, -overlap)
 
             # Now create the alignment with the correct variables
             alignment = Alignment(

@@ -311,6 +311,7 @@ class GraphBuilder_2nd_pass:
                     print(f"component_contig: {component_contig} {self.weights[(f'{component_contig}_b', f'{component_contig}_e')]}")
                     edge_info = (f'{component_contig}_b', f'{component_contig}_e')
                     updated_components.append((self.weights[edge_info], edge_info))
+            updated_components = sorted(updated_components, key=lambda x: float(x[1][0].split("_")[-2]))
             updated_results.append(tuple([traversal[0], traversal[1], traversal[2], tuple(updated_components)]))
         return updated_results
 
@@ -924,6 +925,7 @@ def main():
             sorted_standardized_result_2nd = sorted(list(standardized_result_2nd), key=lambda x: -x[0])
 
             recover_components = graph_builder_2nd.recover_unused_components(sorted_standardized_result_2nd)
+            recover_components = sorted(list(recover_components), key=lambda x: -x[0])
             print("Recover components: ", recover_components)
             decompressed_result_2nd = []
             for ele in recover_components:

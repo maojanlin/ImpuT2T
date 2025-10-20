@@ -92,7 +92,7 @@ def read_genome_alignments(aln_file, flag_primary=False, query_blacklist=[], ref
     return ctg_alns
 
 
-def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINAL_RATIO=0.05, debug=False):
+def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINAL_RATIO=0.05, debug=False, blacklist_pairs=None):
     """
     Build a directed scaffold graph from filtered alignments
     """
@@ -162,23 +162,21 @@ def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINA
             
             # Check if segment overlaps terminal regions
             if als.strands[i] == '+':
-                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_starts[i])):
-                    overlaps_left_terminal = als.ref_starts[i] < als.ref_lens[i] * TERMINAL_RATIO
-                else:
-                    overlaps_left_terminal = False
-                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_ends[i])):
-                    overlaps_right_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
-                else:
-                    overlaps_right_terminal = False
+
+                overlaps_left_terminal = als.ref_starts[i] < als.ref_lens[i] * TERMINAL_RATIO
+                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_starts[i])) == None:
+                    terminal_matches[als.ref_headers[i]]['head'][(query_seq, als.query_starts[i])] = 0
+                overlaps_right_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
+                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_ends[i])) == None:
+                    terminal_matches[als.ref_headers[i]]['tail'][(query_seq, als.query_ends[i])] = 0
             else:
-                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_ends[i])):
-                    overlaps_right_terminal = als.ref_starts[i] < als.ref_lens[i] * (TERMINAL_RATIO)
-                else:
-                    overlaps_right_terminal = False
-                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_starts[i])):
+                overlaps_right_terminal = als.ref_starts[i] < als.ref_lens[i] * (TERMINAL_RATIO)
+                if terminal_matches[als.ref_headers[i]]['head'].get((query_seq, als.query_ends[i])) == None:
+                    terminal_matches[als.ref_headers[i]]['head'][(query_seq, als.query_ends[i])] = 0
+                overlaps_left_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
+                if terminal_matches[als.ref_headers[i]]['tail'].get((query_seq, als.query_starts[i])) == None:
+                    terminal_matches[als.ref_headers[i]]['tail'][(query_seq, als.query_starts[i])] = 0
                     overlaps_left_terminal = als.ref_ends[i] > als.ref_lens[i] * (1 - TERMINAL_RATIO)
-                else:
-                    overlaps_left_terminal = False
             
             if len(duplicate_segments) > 0:
                 # multiple segments, can only be connected to one end
@@ -377,9 +375,24 @@ def get_connectable_fragments(ctg_alns, components_fn, terminal_matches, TERMINA
                                 print(f"  Query positions: {my_query_end} - {their_query_start} = {overlap}")
                                 print(f"  Ref lengths: {als.ref_lens[idx_l]}, {als.ref_lens[idx_r]}")
                             continue  # Skip this connection due to excessive overlap
+                        # Skip blacklisted contig pairs and continue searching
+                        if blacklist_pairs is not None:
+                            left_ctg = als.ref_headers[idx_l]
+                            right_ctg = als.ref_headers[idx_r]
+                            if (left_ctg, right_ctg) in blacklist_pairs:
+                                if debug:
+                                    print(f"Skipping blacklisted pair: {left_ctg} -> {right_ctg}")
+                                continue
+                            # also respect unordered set style if provided
+                            if frozenset((left_ctg, right_ctg)) in blacklist_pairs:
+                                if debug:
+                                    print(f"Skipping blacklisted pair: {{ {left_ctg}, {right_ctg} }}")
+                                continue
+
                         list_candidate_connections.append((idx_l, idx_r, connection_type))
-                    if connection_type >= 4:
-                        break
+                        if connection_type >= 4:
+                            # Only early-break if we accepted a non-blacklisted strong connection
+                            break
         
         print("================================", als.query_header, "================================")
         for idx_l, idx_r, connection_type in list_candidate_connections:
@@ -935,6 +948,7 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     parser.add_argument('--info_only', action='store_true', help='Output only the agp and info files without the patched fasta')
     parser.add_argument('--connect_mode', choices=['closest', 'longest'], default='closest', help='Connection mode [closest]')
+    parser.add_argument('--blacklist', help='Blacklist file')
     args = parser.parse_args()
 
     full_len_paf = args.full_length
@@ -949,7 +963,18 @@ def main():
     DEBUG = args.debug
     INFO_ONLY = args.info_only
     CONNECT_MODE = args.connect_mode
+    BLACKLIST = args.blacklist
     
+    set_blacklist = set()
+    if BLACKLIST:
+        with open(BLACKLIST, "r") as f:
+            for line in f:
+                line = line.rstrip().split(',')
+                set_blacklist.add((line[0], line[1]))
+                set_blacklist.add((line[1], line[0]))
+    else:
+        set_blacklist = set()
+        
     alns_full_len = read_genome_alignments(full_len_paf, True)
 
     alns_selected_full = filter_high_quality_alns(alns_full_len, minimum_length=MIN_CONTIG_LENGTH, length_ratio=TERMINAL_RATIO, max_min_id_ratio=MAX_MIN_ID_RATIO)
@@ -961,7 +986,7 @@ def main():
     ref_alns = reverse_alignments(alns_selected_full)
     #aln_psg = build_aln_scaffold_graph(ref_alns, components_fn, TERMINAL_RATIO, terminal_matches, debug=DEBUG)
     print("ref_alns", "---------------------------------------------------------------------------------------")
-    dict_all_connections = get_connectable_fragments(ref_alns, components_fn, terminal_matches, TERMINAL_RATIO*2, debug=DEBUG)
+    dict_all_connections = get_connectable_fragments(ref_alns, components_fn, terminal_matches, TERMINAL_RATIO*2, debug=DEBUG, blacklist_pairs=set_blacklist)
 
     dict_node_connections = {}
     if CONNECT_MODE == 'closest':
@@ -969,7 +994,9 @@ def main():
         for key, item in dict_all_connections.items():
             for connection in item:
                 idx_l, idx_r, connection_type = connection
+
                 als = ref_alns[key]
+                
                 my_query_end_offset = als.ref_lens[idx_l] - als.ref_ends[idx_l]
                 if als.strands[idx_l] == '-':
                     my_query_end_offset = als.ref_starts[idx_l]

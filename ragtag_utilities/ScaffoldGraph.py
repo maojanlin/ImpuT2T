@@ -852,6 +852,145 @@ class PatchScaffoldGraph:
 
         return new_psg
 
+    def straight_to_agp(self, agp_fn, ref_fn, add_suffix_to_unplaced=False):
+        """
+        Write the AGP file according to all the edges in the scaffold graph, no need to connect everyone together.
+        Each edge becomes a separate connection block (connect00000001, connect00000002, etc.)
+        """
+        used_components = set()
+        connection_idx = 0
+        
+        # Pragma and comment lines
+        pragma_line = f"## agp-version {get_ragtag_version()}"
+        comment_line = f"# AGP created by RagTag {get_ragtag_version()} - Edge-based connections"
+        
+        with open(agp_fn, "w") as agp_file:
+            agp_file.write(pragma_line + "\n")
+            agp_file.write(comment_line + "\n")
+            set_used_pairs = set()
+            
+            for u, v in sorted(self.edges, key=lambda x: int(x[0].split("_")[-2])):
+                if (u, v) in set_used_pairs:
+                    continue
+                set_used_pairs.add((u, v))
+                set_used_pairs.add((v, u))
+                
+                connection_idx += 1
+                obj_header = "connect" + "{0:08}".format(connection_idx)
+                
+                # Get alignment information for this edge
+                patch_aln = self.graph[u][v]["alignment"]
+                patch_query = patch_aln.query
+                patch_strand = "+"
+                if patch_aln.strand:
+                    patch_strand = "-"
+                
+                # Calculate positions and lengths
+                obj_pos = 0
+                obj_pid = 1
+                
+                # Determine sequence names and orientations
+                u_base = u[:-2]
+                v_base = v[:-2]
+                u_strand = "+"
+                v_strand = "+"
+                
+                if u.endswith("_b"):
+                    u_strand = "-"
+                if v.endswith("_e"):
+                    v_strand = "-"
+                
+                # Get sequence lengths
+                u_len = self.component_lens[u_base]
+                v_len = self.component_lens[v_base]
+                
+                # Add first sequence (u)
+                lines = []
+                lines.append("\t".join([
+                    obj_header,
+                    str(obj_pos + 1),
+                    str(obj_pos + u_len),
+                    str(obj_pid),
+                    "W",
+                    u_base,
+                    "1",
+                    str(u_len),
+                    u_strand
+                ]))
+                obj_pos += u_len
+                obj_pid += 1
+                used_components.add(u_base)
+                
+                # Add intermediate sequence (patch) if there's a gap/overlap
+                patch_len = patch_aln.their_query_start - patch_aln.my_query_end
+                if patch_len > 0:
+                    if patch_aln.is_gap:
+                        # Gap line
+                        lines.append("\t".join([
+                            obj_header,
+                            str(obj_pos + 1),
+                            str(obj_pos + patch_len),
+                            str(obj_pid),
+                            "N",
+                            str(patch_len),
+                            "scaffold",
+                            "yes",
+                            "align_genus"
+                        ]))
+                    else:
+                        # Sequence line
+                        lines.append("\t".join([
+                            obj_header,
+                            str(obj_pos + 1),
+                            str(obj_pos + patch_len),
+                            str(obj_pid),
+                            "W",
+                            patch_query,
+                            str(patch_aln.my_query_end + 1),
+                            str(patch_aln.their_query_start),
+                            patch_strand
+                        ]))
+                        used_components.add(patch_query)
+                    obj_pos += patch_len
+                    obj_pid += 1
+                
+                # Add second sequence (v)
+                lines.append("\t".join([
+                    obj_header,
+                    str(obj_pos + 1),
+                    str(obj_pos + v_len),
+                    str(obj_pid),
+                    "W",
+                    v_base,
+                    "1",
+                    str(v_len),
+                    v_strand
+                ]))
+                used_components.add(v_base)
+                
+                # Write all lines for this connection
+                for line in lines:
+                    agp_file.write(line + "\n")
+            
+            # Write unplaced reference sequences
+            fai = pysam.FastaFile(ref_fn)
+            fasta_order = list(fai.references)
+            fai.close()
+            remaining_components = set(fasta_order) - used_components
+            
+            for c in sorted(remaining_components):
+                agp_file.write("\t".join([
+                    c + "_RagTag" * add_suffix_to_unplaced,
+                    "1",
+                    str(self.component_lens[c]),
+                    "1",
+                    "W",
+                    c,
+                    "1",
+                    str(self.component_lens[c]),
+                    "+"
+                ]) + "\n")
+
     def write_agp(self, agp_fn, ref_fn, add_suffix_to_unplaced=False):
         """
         Write the AGP file implied by the scaffold graph

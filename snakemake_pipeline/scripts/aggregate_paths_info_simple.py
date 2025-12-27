@@ -1,0 +1,1061 @@
+import argparse
+import os
+import copy
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import List, Set, Tuple, Dict
+from combine_connections import read_agp_file, merge_segments, reverse_segments
+from ragtag_utilities.utilities import run_oae, get_ragtag_version, get_impuT2T_version
+import ragtag_agp2fa 
+
+os.environ["MKL_THREADING_LAYER"] = "GNU"
+import pysam
+import numpy as np
+from sklearn.mixture import GaussianMixture
+import sys
+
+import time
+
+
+class TimeoutException(Exception):
+    pass
+
+
+
+def parse_sample_list(list_sample: str) -> list[str]:
+    with open(list_sample) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+# ==================== Node Utility Functions ====================
+class NodeUtils:
+    """Utility functions for working with graph nodes (contig_b, contig_e format)."""
+    
+    @staticmethod
+    def get_contig(node: str) -> str:
+        """Extract contig name from node (removes _b or _e suffix)."""
+        return node[:-2]
+    
+    @staticmethod
+    def is_begin(node: str) -> bool:
+        """Check if node is a begin node (ends with _b)."""
+        return node.endswith("_b")
+    
+    @staticmethod
+    def is_end(node: str) -> bool:
+        """Check if node is an end node (ends with _e)."""
+        return node.endswith("_e")
+    
+    @staticmethod
+    def get_opposite(node: str) -> str:
+        """Get the opposite end of a contig node."""
+        contig = NodeUtils.get_contig(node)
+        return f"{contig}_e" if NodeUtils.is_begin(node) else f"{contig}_b"
+    
+    @staticmethod
+    def get_both_ends(contig: str) -> Tuple[str, str]:
+        """Get both begin and end nodes for a contig."""
+        return f"{contig}_b", f"{contig}_e"
+    
+    @staticmethod
+    def get_contigs_from_nodes(nodes: List[str]) -> Set[str]:
+        """Extract contig names from a list of nodes."""
+        return {NodeUtils.get_contig(node) for node in nodes}
+    
+    @staticmethod
+    def get_nodes_from_contigs(contigs: Set[str]) -> Set[str]:
+        """Convert contig names to both begin and end nodes."""
+        nodes = set()
+        for contig in contigs:
+            nodes.update(NodeUtils.get_both_ends(contig))
+        return nodes
+
+
+
+class EdgeAggregator:
+    def __init__(self, input_path: str, samples: list[str], gmm: bool):
+        self.input_path = input_path
+        self.samples = samples
+        self.gmm = gmm
+        self.raw_edges = {}
+        self.edges = {}
+
+    def fit_gmm(self, x, max_components=10, cutoff=0.1):
+        bics = []
+        models = []
+        x = x.reshape(-1, 1)
+        for k in range(1, max_components + 1):
+            gmm = GaussianMixture(n_components=k, covariance_type='full').fit(x)
+            weights = gmm.weights_
+            significant_components = weights > cutoff
+            if significant_components.sum() < len(significant_components):
+                break
+            bics.append(gmm.bic(x))
+            models.append(gmm)
+        best_k = np.argmin(bics)
+        best_model = models[best_k]
+        return best_model, best_k+1
+    
+    def aggregate(self):
+        """
+        edges:
+        - key: (u, v) # sorted
+        - value: (weight, max_score, max_sample_id)
+        """
+        for sample in self.samples:
+            if os.path.exists(self.input_path + sample + ".info"):
+                with open(self.input_path + sample + ".info", "r") as f:
+                    for line in f.readlines():
+                        u, v, score, dist = line.strip().split("\t")
+                        pair = tuple(sorted([u, v]))
+                        if pair not in self.raw_edges:
+                            self.raw_edges[pair] = [[sample], [(int(score), int(dist))]]
+                        else:
+                            self.raw_edges[pair][0].append(sample)
+                            self.raw_edges[pair][1].append((int(score), int(dist)))
+            else:
+                print(f"Warning: {sample} not found in {self.input_path}")
+        if self.gmm:
+            for pair, info in self.raw_edges.items():
+                scores = [s for s, d in info[1]]
+                dists = [d for s, d in info[1]]
+                relevant_samples = info[0]
+                if len(relevant_samples) > 10:
+                    gmm, best_k = self.fit_gmm(np.array(dists))
+                    means = gmm.means_.flatten()
+                    stds = np.sqrt(gmm.covariances_.flatten())  # for 1D case
+                    print(f"====================================== Best k: {best_k} ======================================")
+                    print(f"======== pair: {pair} ========")
+                    print(f"GMM means: {means}, stds: {stds}")
+                    gmm_scores = []
+                    gmm_samples = []
+                    gmm_dists = []
+                    for mean, std in zip(means, stds):
+                        candidate_dists = []
+                        candidate_scores = []
+                        candidate_samples = []
+                        for idx in range(len(dists)):
+                            upper_bound = mean + 1.5*std
+                            lower_bound = mean - 1.5*std if mean - 1.5*std > 0 and mean > 0 else mean - std
+                            if dists[idx] <= upper_bound and dists[idx] >= lower_bound:
+                                candidate_dists.append(dists[idx])
+                                candidate_scores.append(scores[idx])
+                                candidate_samples.append(relevant_samples[idx])
+                        if len(candidate_dists) > 0:
+                            best_close_idx = np.argmax(candidate_scores)
+                            gmm_scores.append(candidate_scores[best_close_idx])
+                            gmm_samples.append(candidate_samples[best_close_idx])
+                            gmm_dists.append(candidate_dists[best_close_idx])
+
+                    final_selected_idx = np.argmax(gmm_scores)
+                    max_score = max(gmm_scores)
+                    if max_score < 3000 and stds[final_selected_idx] > 200000: # low confidence, check the distribution of the distances, stds[final_selected_idx] > 200000 is to avoid the case that the distance is too large
+                        print(f"std: {stds[final_selected_idx]} is too large, try others")
+                        smaller_scores = []
+                        smaller_idx = []
+                        for gmm_idx, (mean, std) in enumerate(zip(means, stds)):
+                            if std < 200000:
+                                smaller_scores.append(gmm_scores[gmm_idx])
+                                smaller_idx.append(gmm_idx)
+                        if len(smaller_scores) > 0:
+                            final_selected_idx = smaller_idx[np.argmax(smaller_scores)]
+                        else:
+                            print(f"NO SMALLER STD FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
+                            """Try to select the highest score among the candidates closer to 0 with distance"""
+
+                            small_max_score = 0
+                            small_idx = -1
+                            for idx_dist, dist in enumerate(dists):
+                                if abs(dist) < 100000:
+                                    if scores[idx_dist] > small_max_score:
+                                        small_max_score = scores[idx_dist]
+                                        small_idx = idx_dist
+                            if small_idx != -1 and small_max_score > max_score*0.5:
+                                final_selected_idx = small_idx
+                                max_score = small_max_score
+                                print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
+                                self.edges[pair] = [len(relevant_samples), max_score, relevant_samples[final_selected_idx], dists[final_selected_idx]]
+                            else:
+                                print(f"NO SMALLER SCORE FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
+                                top_10_score = sorted(scores, reverse=True)[:10]
+                                print(f"Top 10 score: {top_10_score})")
+                                small_max_dist = gmm_dists[final_selected_idx]
+                                small_idx = -1
+                                for idx_score, score in enumerate(scores):
+                                    if score in top_10_score:
+                                        if dists[idx_score] < small_max_dist:
+                                            small_max_dist = dists[idx_score]
+                                            small_idx = idx_score
+                                if small_idx != -1:
+                                    final_selected_idx = small_idx
+                                    max_score = scores[final_selected_idx]
+                                    print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
+                                    self.edges[pair] = [len(relevant_samples), max_score, relevant_samples[final_selected_idx], dists[final_selected_idx]]
+                                else:
+                                    selected_sample = gmm_samples[final_selected_idx]
+                                    selected_distance = gmm_dists[final_selected_idx]
+                                    print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
+                                    self.edges[pair] = [len(relevant_samples), gmm_scores[final_selected_idx], selected_sample, selected_distance] 
+
+                    else:
+                        selected_sample = gmm_samples[final_selected_idx]
+                        selected_distance = gmm_dists[final_selected_idx]
+                        print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
+                        self.edges[pair] = [len(relevant_samples), gmm_scores[final_selected_idx], selected_sample, selected_distance]
+                else:
+                    idx = np.argmax(scores)
+                    self.edges[pair] = [len(relevant_samples), scores[idx], relevant_samples[idx], dists[idx]]
+        else:
+            for pair, info in self.raw_edges.items():
+                idx = np.argmax(info[1], key=lambda x: x[0])
+                self.edges[pair] = [len(info[0]), info[1][idx][0], info[0][idx]]
+
+        return self.edges
+
+class GraphBuilder:
+    def __init__(self, edges, weight_type, weight_ratio, AS_threshold, AF_threshold, contig_fasta, sample_size):
+        self.edges = edges
+        self.weight_type = weight_type
+        self.weight_ratio = weight_ratio
+        self.AS_threshold = AS_threshold
+        self.AF_threshold = AF_threshold
+        self.sample_size = sample_size
+        self.graph = defaultdict(list)
+        self.weights = {}
+        self.nodes = set()
+        self.dict_node_score = defaultdict(list)
+        self.dict_edge_info = {}
+        self.dict_node_outgoing_edges = defaultdict(list)
+        self.filtered_edges = set()
+        fai = pysam.FastaFile(contig_fasta)
+        self.contig_lengths = {contig: fai.get_reference_length(contig) for contig in fai.references}
+        self.contig_avg_length = sum(self.contig_lengths.values()) / len(self.contig_lengths)
+        self.dict_compressed_2_component = {}
+
+    def build(self, filter_num: int = 200, filter_type: str = "AF"):
+        if filter_type == "AF":
+            filter_func = lambda x: x[1][0]
+        elif filter_type == "AS":
+            filter_func = lambda x: x[1][1]
+        else:
+            raise ValueError(f"Invalid filter type: {filter_type}")
+
+        edges_sorted = sorted(self.edges.items(), key=filter_func, reverse=True)
+        for pair, values in edges_sorted:
+            u, v = pair
+            w = values[self.weight_type]
+            self.dict_node_score[u].append((w, v))
+            self.dict_node_score[v].append((w, u))
+            self.dict_edge_info[(u, v)] = values
+            self.dict_edge_info[(v, u)] = values
+
+        # local edge filtering for each node
+        for node, scores in self.dict_node_score.items():
+            max_score = max(scores, key=lambda x: x[0])[0]
+            for score, neighbor in scores:
+                if score < max_score * self.weight_ratio:
+                    self.filtered_edges.add((node, neighbor))
+                    self.filtered_edges.add((neighbor, node))
+
+        add_counter = 0
+        for pair, values in edges_sorted:
+            u, v = pair
+            AF, AS, _, edge_dist = values
+            w = AF / (2*self.sample_size)
+            
+            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges or add_counter > filter_num:
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
+                #print(f"Filtered edge in filtered_edges: {pair}, values: {values}, filtered_edges: {self.filtered_edges}")
+                continue
+
+            add_counter += 1
+            print("\t", (u, v), values)
+
+            # undirected graph assignment
+            self.graph[u].append(v)
+            self.graph[v].append(u)
+            self.weights[(u, v)] = w
+            self.weights[(v, u)] = w
+            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
+
+            self.dict_node_outgoing_edges[u].append((v, w))
+            self.dict_node_outgoing_edges[v].append((u, w))
+
+
+        """
+        print("EDGES STATISTICS:", len(edges_sorted))
+        for idx, (pair, values) in enumerate(sorted(self.dict_edge_info.items(), key=lambda x: x[1][0])):
+            print(f"{idx+1}. {pair}: {values[0]}, {values[0]/2/self.sample_size:.2f}")
+        print("EDGES STATISTICS:", len(edges_sorted))
+        for idx, (pair, values) in enumerate(sorted(self.dict_edge_info.items(), key=lambda x: x[1][1])):
+            print(f"{idx+1}. {pair}: {values[1]}")
+        print("--------------------------------"*2)
+        """
+
+        """
+        for pair, values in edges_sorted:
+            u, v = pair
+            AF, AS, _, edge_dist = values
+            #w = values[self.weight_type]
+            #w = AS*AF*2/(dict_node_AF_count[u]+dict_node_AF_count[v])
+            #w = AF/(dict_node_AF_count[u]+dict_node_AF_count[v])
+            w = AF / (2*self.sample_size)
+            
+            if AS < self.AS_threshold: # filtering through AS threshold
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
+                #print(f"Filtered edge AS < AS_threshold: {pair}, values: {values}, AS: {AS}, AS_threshold: {self.AS_threshold}")
+                continue
+            if AF <= self.AF_threshold * self.sample_size * 2: # filtering through AF threshold
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
+                #print(f"Filtered edge AF <= AF_threshold: {pair}, values: {values}, AF: {AF}, AF_threshold: {self.AF_threshold * self.sample_size * 2}")
+                continue
+            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges:
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
+                #print(f"Filtered edge in filtered_edges: {pair}, values: {values}, filtered_edges: {self.filtered_edges}")
+                continue
+            print("\t", (u, v), values)
+            # undirected graph assignment
+            self.graph[u].append(v)
+            self.graph[v].append(u)
+            self.weights[(u, v)] = w #- abs(edge_dist/50)
+            self.weights[(v, u)] = w #- abs(edge_dist/50)
+            #self.weights[(u, v)] = w
+            #self.weights[(v, u)] = w
+            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
+
+            self.dict_node_outgoing_edges[u].append((v, w))
+            self.dict_node_outgoing_edges[v].append((u, w))
+        """
+
+        for node in self.nodes:
+            if node.endswith("_b"):
+                contig = node[:-2]
+                e_node = f"{contig}_e"
+                self.graph[node].append(e_node)
+            elif node.endswith("_e"):
+                contig = node[:-2]
+                b_node = f"{contig}_b"
+                self.graph[node].append(b_node)
+        
+        for contig in self.contig_lengths:
+            b_node = f"{contig}_b"
+            e_node = f"{contig}_e"
+            self.weights[(b_node, e_node)] = self.contig_lengths[contig]/self.contig_avg_length
+            self.weights[(e_node, b_node)] = self.contig_lengths[contig]/self.contig_avg_length
+        return self.graph, self.weights, self.nodes, self.dict_edge_info, self.dict_node_outgoing_edges
+
+
+    # functions for second pass graph building
+    def build_with_results(self, connected_components, connected_components_scores, filter_num: int = 200, filter_type: str = "AF"):
+        if filter_type == "AF":
+            filter_func = lambda x: x[1][0]
+        elif filter_type == "AS":
+            filter_func = lambda x: x[1][1]
+        else:
+            raise ValueError(f"Invalid filter type: {filter_type}")
+
+        dict_node_2_compressed = {}
+        self.dict_compressed_2_component = {}
+        set_used_nodes = set()
+        set_used_contigs = set()
+
+        for idx, component in enumerate(connected_components):
+            if len(component) == 1:
+                continue
+            average_order = sum([int(pair[0].split("_")[-2]) for pair in component]) / len(component)
+            average_order += 0.01*int(component[0][0].split("_")[-2])
+            compressed_name = f"impuT2T_{average_order:.2f}"
+            self.dict_compressed_2_component[compressed_name] = component
+            u = compressed_name + '_b'
+            v = compressed_name + '_e'
+            dict_node_2_compressed[component[0][0]] = u
+            dict_node_2_compressed[component[-1][1]] = v
+            for idy in range(len(component)-1):
+                set_used_nodes.update([component[idy][1], component[idy+1][0]])
+            set_used_contigs.update([pair[0][:-2] for pair in component])
+
+            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
+
+            self.weights[(u, v)] = connected_components_scores[idx]
+            self.weights[(v, u)] = connected_components_scores[idx]
+
+        print("dict_node_2_compressed", dict_node_2_compressed)
+        print("set_used_contigs", set_used_contigs)
+        print("set_used_nodes", set_used_nodes)
+        print("--------------------------------"*2)
+
+        edges_sorted = sorted(self.edges.items(), key=filter_func, reverse=True)
+        compressed_edges = []
+        add_counter = 0
+        for pair, values in edges_sorted:
+            if add_counter > filter_num:
+                self.filtered_edges.add(pair)
+                self.filtered_edges.add(pair[::-1])
+                break
+
+            u, v = pair
+            # if one of the nodes is internal compressed node, skip
+            if u in set_used_nodes or v in set_used_nodes: 
+                continue
+            elif u in dict_node_2_compressed and v in dict_node_2_compressed:
+                new_u = dict_node_2_compressed[u]
+                new_v = dict_node_2_compressed[v]
+                compressed_edges.append(((new_u, new_v), values))
+            elif u in dict_node_2_compressed:
+                new_u = dict_node_2_compressed[u]
+                compressed_edges.append(((new_u, v), values))
+            elif v in dict_node_2_compressed:
+                new_v = dict_node_2_compressed[v]
+                compressed_edges.append(((u, new_v), values))
+            else:
+                compressed_edges.append(((u, v), values))
+            add_counter += 1
+
+        # Add edges and nodes with new name to the graph
+        for pair, values in compressed_edges:
+            u, v = pair
+            w = values[self.weight_type]
+            self.dict_node_score[u].append((w, v))
+            self.dict_node_score[v].append((w, u))
+            self.dict_edge_info[(u, v)] = values
+            self.dict_edge_info[(v, u)] = values
+
+        dict_node_AF_count = defaultdict(int)
+        for pair, values in compressed_edges:
+            AF, AS, *_ = values
+            dict_node_AF_count[pair[0]] += AF
+            dict_node_AF_count[pair[1]] += AF
+
+        for pair, values in compressed_edges:
+            u, v = pair
+            AF, AS, *_ = values
+            w = AF / (2*self.sample_size)
+            print("\t", (u, v), values)
+            # undirected graph assignment
+            self.graph[u].append(v)
+            self.graph[v].append(u)
+            self.weights[(u, v)] = w
+            self.weights[(v, u)] = w
+            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
+
+            self.dict_node_outgoing_edges[u].append((v, w))
+            self.dict_node_outgoing_edges[v].append((u, w))
+
+        for node in self.nodes:
+            if node.endswith("_b"):
+                contig = node[:-2]
+                e_node = f"{contig}_e"
+                self.graph[node].append(e_node)
+            elif node.endswith("_e"):
+                contig = node[:-2]
+                b_node = f"{contig}_b"
+                self.graph[node].append(b_node)
+        
+        for contig in self.contig_lengths:
+            if contig in set_used_contigs:
+                print(f"contig: {contig} is used in the first stage")
+                continue
+            b_node = f"{contig}_b"
+            e_node = f"{contig}_e"
+            self.weights[(b_node, e_node)] = 0 #self.contig_lengths[contig]/1000
+            self.weights[(e_node, b_node)] = 0 #self.contig_lengths[contig]/1000
+        return self.graph, self.weights, self.nodes, self.dict_node_outgoing_edges
+
+    def decompress_component(self, component):
+        """
+        Decompress the component by replacing the compressed nodes with the original nodes
+        """
+        new_component = []
+        for path in component:
+            new_path = []
+            for pair in path:
+                if pair[0][:-2] in self.dict_compressed_2_component:
+                    if pair[0].endswith("_b"):
+                        new_path += self.dict_compressed_2_component[pair[0][:-2]]
+                    else:
+                        new_path += self.dict_compressed_2_component[pair[0][:-2]][::-1]
+                else:
+                    new_path.append(pair)
+            new_component.append(new_path)
+        return new_component
+
+
+
+class PathFinder:
+    def __init__(self, graph, weights, nodes, dict_node_outgoing_edges):
+        self.graph = graph
+        self.weights = weights
+        self.nodes = nodes
+        self.dict_node_outgoing_edges = dict_node_outgoing_edges
+
+        # variables for search_paths
+        self.num_nodes = len(nodes)
+
+        #self.searched_paths = set()
+        self.best_score_component = {'score':0, 'length':self.num_nodes, 'component':[]}
+        self.best_connected_component = {'score':0, 'length':self.num_nodes, 'component':[]}
+        
+        # Timeout management
+        self.search_start_time = None
+        self.search_timeout_seconds = None
+
+    def find_end_nodes_unvisited(self, visited_nodes: Set[str]) -> Set[str]:
+        remaining_nodes = self.nodes - visited_nodes
+
+        end_nodes = set()
+        for node in remaining_nodes:
+            list_outgoing_edges = self.dict_node_outgoing_edges[node]
+            flag_end_node = True
+            for edge in list_outgoing_edges:
+                if edge[0] not in visited_nodes and edge[1] not in visited_nodes:
+                    flag_end_node = False
+                    break
+            if flag_end_node:
+                end_nodes.add(node)
+        
+        if end_nodes:
+            return end_nodes
+        else:
+            return remaining_nodes
+
+    def search_paths_DFS(self, current_path: List[str], current_node: str, connected_components: List[List[str]],
+                    visited_nodes: Set[str], visited_contigs: Set[str], depth: int) -> None:
+        """
+        DFS search for all possible paths.
+        1. Check if all the nodes are visited
+            1.1 all visited -> calculate and record the best scored path
+            1.2 keep visited until all the nodes are visited
+        2. Tunneling to the other end of current node, then traverse all outgoing edges for the other end
+            2.1 if no outgoing edges -> find new starting node in the remaining unvisited nodes
+        """
+        
+        # Check timeout at the start of each recursive call
+        if self.search_timeout_seconds is not None and self.search_start_time is not None:
+            elapsed_time = time.time() - self.search_start_time
+            if elapsed_time > self.search_timeout_seconds:
+                raise TimeoutException(f"Search timeout after {elapsed_time:.2f} seconds")
+
+        # All nodes are visited -> calculate and record only the best scored path
+        if self.num_nodes == len(visited_nodes):
+            # CRITICAL: Append a copy of current_path, not a reference
+            connected_components.append(copy.deepcopy(current_path))
+            print("Traversal completed!")
+            score, length, _ = self.component_score(connected_components)
+            if score > self.best_score_component['score']:
+                # CRITICAL: Store a deep copy, not a reference (connected_components will continue to be modified)
+                self.best_score_component = {
+                    'score': score, 
+                    'length': length, 
+                    'component': copy.deepcopy(connected_components)
+                }
+                print("best_score_component updated: ", self.best_score_component)
+            if length <= self.best_connected_component['length']:
+                if score > self.best_connected_component['score']:
+                    # CRITICAL: Store a deep copy, not a reference
+                    self.best_connected_component = {
+                        'score': score, 
+                        'length': length, 
+                        'component': copy.deepcopy(connected_components)
+                    }
+                    print("best_connected_component updated: ", self.best_connected_component)
+            print("--------------------------------"*2)
+            return
+
+        # Go to the other end of the same contig / connected contigs
+        opposite_node = NodeUtils.get_opposite(current_node)
+        outgoing_edges = self.dict_node_outgoing_edges[opposite_node]
+        unvisited_edges = [edge for edge in outgoing_edges if edge[0] not in visited_nodes and edge[1] not in visited_nodes]
+
+        
+        if len(unvisited_edges) == 0:
+            print("Reach End!") #, current_path)
+            # Reaching the end of this path, start a new path from the remaining end nodes
+            # CRITICAL: Append a copy of current_path, not a reference
+            connected_components.append(copy.deepcopy(current_path))
+            remaining_end_nodes = self.find_end_nodes_unvisited(visited_nodes)
+            for end_node in remaining_end_nodes:
+                print("---" * depth + '||', len(connected_components), "| end_node: ", end_node)
+
+                new_path = [(end_node, NodeUtils.get_opposite(end_node))]
+                new_visited_nodes = visited_nodes.union([end_node, NodeUtils.get_opposite(end_node)])
+                new_visited_contigs = visited_contigs.union([NodeUtils.get_contig(end_node)])
+                # CRITICAL: Use deep copy - shallow copy only copies the outer list, inner lists are still references
+                self.search_paths_DFS(new_path, end_node, copy.deepcopy(connected_components), new_visited_nodes, new_visited_contigs, depth + 1)
+            print("---" * depth + '||', current_node)
+            return
+
+        # Keep traversing the outgoing edges
+        for outgoing_edge in unvisited_edges:
+            new_path = current_path + [(outgoing_edge[0], NodeUtils.get_opposite(outgoing_edge[0]))]
+            new_visited_nodes = visited_nodes.union([outgoing_edge[0], NodeUtils.get_opposite(outgoing_edge[0])])
+            new_visited_contigs = visited_contigs.union([NodeUtils.get_contig(outgoing_edge[0])])
+            # CRITICAL: Must copy connected_components here! All recursive calls share the same list otherwise
+            # When one call appends to connected_components (line 739), all other calls see that change
+            self.search_paths_DFS(new_path, outgoing_edge[0], copy.deepcopy(connected_components), new_visited_nodes, new_visited_contigs, depth + 1)        
+        print("---" * depth + '|', current_node)
+        return
+
+    def component_score(self, component: List[List[str]]) -> float:
+        """
+        Calculate individual score of each path, use HHI with power 1.5 to sum up the total score
+        """
+        scores = []
+        for path in component:
+            contig_score = 0.0
+            #print("path: ", path)
+            for edge in path:
+                #print("edge: ", edge, "weight: ", self.weights.get((edge[0], edge[1]), 0.0))
+                contig_score += self.weights.get((edge[0], edge[1]), 0.0)
+            connection_score = 0.0
+            for idx in range(len(path) - 1):
+                #print("connection: ", path[idx][1], path[idx+1][0], "weight: ", self.weights.get((path[idx][1], path[idx+1][0]), 0.0))
+                connection_score += self.weights.get((path[idx][1], path[idx+1][0]), 0.0)*10
+                
+            path_score = contig_score + connection_score
+            scores.append(path_score)
+            
+            #scores.append(connection_score)
+        HHI_score = sum([score**1.5 for score in scores])
+        return (int(HHI_score), len(component), scores)
+
+    def invert_path(self, path: List[str]) -> List[str]:
+        """
+        Invert the path by reversing the order of the each edge and internal nodes
+        """
+        new_path = []
+        for edge in path[::-1]:
+            new_path.append((edge[1], edge[0]))
+        return new_path
+
+    def smaller_than(self, node_1: str, node_2: str) -> bool:
+        return float(node_1.split("_")[-2]) < float(node_2.split("_")[-2])
+
+    def sort_component(self, component: List[List[str]]) -> List[List[str]]:
+        sorted_component = []
+        for path in component:
+            if self.smaller_than(path[0][0], path[-1][0]):
+                sorted_component.append(path)
+            else:
+                sorted_component.append(self.invert_path(path))
+        sorted_component = sorted(sorted_component, key=lambda x: float(x[0][0].split("_")[-2]))
+        return sorted_component
+        
+
+class AGPAssembler:
+    def __init__(self, agp_dir):
+        self.agp_dir = agp_dir
+
+    def find_connection_segments_in_agp(self, agp_path, start_node, end_node) -> tuple[list[dict], bool]:
+        def parse_node(node):
+            if node.endswith('_b'):
+                return node[:-2], 'b'
+            elif node.endswith('_e'):
+                return node[:-2], 'e'
+            else:
+                return node, None
+            
+        def check_orientation(strand_s, strand_e, start_end, end_end, flag_forward):
+            start_match = end_match = False
+            if flag_forward == False:
+                strand_s *= -1
+                strand_e *= -1
+            if (start_end == 'e' and strand_s == 1) or (start_end == 'b' and strand_s == -1):
+                start_match = True
+            if (end_end == 'b' and strand_e == 1) or (end_end == 'e' and strand_e == -1):
+                end_match = True
+            return start_match and end_match
+        
+        start_contig, start_end = parse_node(start_node)
+        end_contig, end_end = parse_node(end_node)
+        agp_entries = read_agp_file(agp_path)
+        start_indices = [i for i, l in enumerate(agp_entries) if l['component_id'] == start_contig]
+        end_indices = [i for i, l in enumerate(agp_entries) if l['component_id'] == end_contig]
+        if not start_indices or not end_indices:
+            print("No valid node found!!")
+            return [], False
+        candidate_pairs = []
+        for s in start_indices:
+            for e in end_indices:
+                if abs(e - s) <= 2:
+                    candidate_pairs.append((s, e))
+        if len(candidate_pairs) == 0:
+            print("No valid candidate pairs found!!")
+            return [], False
+        for s, e in candidate_pairs:
+            strand_s = 1 if agp_entries[s]['orientation'] == '+' else -1
+            strand_e = 1 if agp_entries[e]['orientation'] == '+' else -1
+            
+            # Check if all entries belong to the same AGP block
+            if s <= e:
+                candidate_entries = agp_entries[s:e+1]
+            else:
+                candidate_entries = agp_entries[e:s+1]
+            
+            # Verify all entries have the same object ID (first column)
+            object_ids = [entry['object'] for entry in candidate_entries]
+            if len(set(object_ids)) != 1:
+                continue  # Skip this pair if entries don't belong to the same block
+            
+            if s <= e:
+                if check_orientation(strand_s, strand_e, start_end, end_end, True):
+                    return candidate_entries, True
+            else:
+                if check_orientation(strand_s, strand_e, start_end, end_end, False):
+                    return candidate_entries, False
+        print("No valid connection found!!")
+        return [], False
+
+    def extract_and_merge(self, path, dict_edge_info, agp_path):
+        all_segments = []
+        for idx in range(len(path)-1):
+            u, v = path[idx][1], path[idx+1][0]
+            edge_info = dict_edge_info[(u, v)]
+            sample = edge_info[2]
+            agp_file = agp_path + f"{sample}.agp"
+            print(f"AGP connection for {u} -> {v} in sample {sample}:")
+            segments, flag_forward = self.find_connection_segments_in_agp(agp_file, u, v)
+            if segments:
+                if not flag_forward:
+                    segments = reverse_segments(segments)
+                updated_segments = merge_segments(all_segments, segments)
+                if updated_segments:
+                    all_segments = updated_segments
+                else:
+                    print("Fail to merge segments")
+                    continue
+        return all_segments
+    
+class SequenceCollector:
+    def __init__(self, ref_path):
+        self.ref_path = ref_path
+    
+    def collect(self, relevant_ref_ids, contig_fasta_path, output_path):
+        list_files = [self.ref_path + id + ".fasta" for id in relevant_ref_ids]
+        with open(output_path + ".relevant_seq.fasta", "w") as out_f:
+            for fasta in [contig_fasta_path] + list_files:
+                with open(fasta, "r") as in_f:
+                    content = in_f.read()
+                    out_f.write(content)
+                    if not content.endswith('\n'):
+                        out_f.write('\n')
+        return output_path + ".relevant_seq.fasta"
+    
+def run_path_search_with_retry(
+    path_finder: PathFinder,
+    initial_timeout: int = 300,
+    retry_timeout: int = 300,
+    filter_num: int = 20,
+) -> PathFinder:
+    """
+    Run path search with timeout handling and automatic retry.
+    
+    Args:
+        path_finder: PathFinder instance to use
+        initial_timeout: Initial timeout in seconds (default 300)
+        retry_timeout: Timeout for retry attempt in seconds (default 300)
+    
+    Returns:
+        path_finder if search completed successfully, partially searched path_finder if timed out
+    """
+    end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
+
+    # Initial attempt
+    path_finder.search_start_time = time.time()
+    path_finder.search_timeout_seconds = initial_timeout
+    
+    for end_node in end_nodes:
+        try:
+            path_finder.search_paths_DFS(
+                current_path=[(end_node, NodeUtils.get_opposite(end_node))],
+                current_node=end_node,
+                connected_components=[],
+                visited_nodes={end_node, NodeUtils.get_opposite(end_node)},
+                visited_contigs={NodeUtils.get_opposite(end_node)},
+                depth=0
+            )
+        except TimeoutException as e:
+            elapsed = time.time() - path_finder.search_start_time
+            print(f"Timeout occurred after {elapsed:.2f} seconds: {e}")
+            # Retry with filtered graph
+            print("Restarting with a filtered graph...")
+            graph_builder = GraphBuilder(path_finder.edges, path_finder.weight_type, path_finder.weight_ratio, path_finder.AS_threshold, path_finder.AF_threshold, path_finder.contig_fasta, len(path_finder.samples))
+            graph, weights, nodes, dict_node_outgoing_edges = graph_builder.build(filter_num=filter_num)
+            path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
+
+            path_finder.search_start_time = time.time()
+            path_finder.search_timeout_seconds = retry_timeout
+            end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
+            for end_node in end_nodes:
+                try:
+                    path_finder.search_paths_DFS(
+                        current_path=[(end_node, NodeUtils.get_opposite(end_node))],
+                        current_node=end_node,
+                        connected_components=[],
+                        visited_nodes={end_node, NodeUtils.get_opposite(end_node)},
+                        visited_contigs={NodeUtils.get_contig(end_node)},
+                        depth=0
+                    )
+                    return path_finder
+                except TimeoutException as e2:
+                    elapsed2 = time.time() - path_finder.search_start_time
+                    print(f"Retry timeout occurred after {elapsed2:.2f} seconds: {e2}")
+                    return path_finder
+
+def output_agp(components, contig_fasta_path, output_path):
+    pragma_line = f"## agp-version {get_ragtag_version()}"
+    comment_line = f"# AGP created by impuT2T {get_impuT2T_version()}"
+
+    used_contigs = set()
+    contig_lengths = {}
+    contig_order = []
+    fai = pysam.FastaFile(contig_fasta_path)
+    contig_order = list(fai.references)
+    contig_lengths = {name: fai.get_reference_length(name) for name in contig_order}
+    fai.close()
+    
+    # Create a mapping from first component to component index
+    # Create a list of all items to output, sorted by their first contig's position in FASTA
+    output_items = []
+    component_first_contig = {}
+    component_idx = 0
+    for component in components:
+        if component:
+            first_contig = component[0]['component_id']
+            output_items.append(('patch', component_idx, component, first_contig))
+            component_first_contig[first_contig] = component_idx
+            for segment in component:
+                used_contigs.add(segment['component_id'])
+            component_idx += 1
+    
+    # Add unplaced contigs
+    for contig in contig_order:
+        if contig not in used_contigs:
+            output_items.append(('unplaced', contig, None, contig))
+    
+    # Sort by position in FASTA order
+    contig_to_position = {contig: idx for idx, contig in enumerate(contig_order)}
+    output_items.sort(key=lambda x: contig_to_position.get(x[3], float('inf')))
+    
+    with open(output_path + '.agp', 'w') as f:
+        f.write(pragma_line + '\n')
+        f.write(comment_line + '\n')
+        for item_type, item_id, component, first_contig in output_items:
+            if item_type == 'patch':
+                object = 'patch' + "{0:08}".format(item_id)
+                print(f"idx: {item_id}, Object: {object}, component length: {len(component)}")
+                for segment in component:
+                    f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"
+                       f"{segment['part_num']}\t{segment['component_type']}\t{segment['component_id']}\t"
+                       f"{segment['component_beg']}\t{segment['component_end']}\t{segment['orientation']}\n")
+            else:  # unplaced
+                f.write(f"{item_id}\t1\t{contig_lengths[item_id]}\t1\tW\t{item_id}\t1\t{contig_lengths[item_id]}\t+\n")
+
+
+def main():
+    parser = argparse.ArgumentParser("impuT2T patching version: " + get_impuT2T_version())
+    parser.add_argument("-p", "--path", required=True, help="Input path")
+    parser.add_argument("-l", "--list_sample", required=True, help="file containing list of samples")
+    parser.add_argument("-w", "--weight", help="weight type: allele_freq or max_alignment_score [AF|AS]", default="AS")
+    parser.add_argument("-wr", "--weight_ratio", help="weight ratio, discard the edge less than ratio of the max weight the same node [0.7]", type=float, default=0.7)
+    parser.add_argument("-ast", "--AS_threshold", help="AS threshold, discard the edge less than threshold [6000]", type=int, default=6000)
+    parser.add_argument("-aft", "--AF_threshold", help="AF threshold, discard the edge less than threshold [0.005]", type=float, default=0.005)
+    parser.add_argument("--timeout", help="timeout for full path traversal [300(s)]", type=int, default=300)
+    parser.add_argument("--debug", help="debug mode", action="store_true")
+    parser.add_argument("--contig_fasta", required=True, help="contig fasta file, needed for unplaced contigs")
+    parser.add_argument("--ref_path", help="reference path, only specify if you want the patch fasta output")
+    parser.add_argument("--second_pass", help="second pass connection", action="store_true")
+    parser.add_argument("--gmm", help="use gmm for edges selection", action="store_true")
+    parser.add_argument("-o", "--output", help="output path", default="patch.result")
+    args = parser.parse_args()
+
+    # Collect edges from all samples
+    if args.weight == "AF":
+        weight_type = 0
+    elif args.weight == "AS":
+        weight_type = 1
+    else:
+        raise ValueError(f"Invalid weight type: {args.weight}")
+
+    samples = parse_sample_list(args.list_sample)
+
+    edge_aggregator = EdgeAggregator(args.path, samples, args.gmm)
+    edges = edge_aggregator.aggregate()
+    if args.debug:
+        for pair, values in sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2])):
+            print(pair, values)
+
+    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
+    graph, weights, nodes, dict_edge_info, dict_node_outgoing_edges = graph_builder.build()
+    edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
+    print("graph", "--------------------------------"*2)
+    for ele in graph:
+        print(ele, graph[ele])
+    print("--------------------------------"*2)
+    for ele in weights:
+        print("weights", ele, weights[ele])
+    print("--------------------------------"*2)
+    for ele in edges_sorted:
+        print(ele)
+    print("--------------------------------"*2)
+
+
+    path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
+    #end_nodes = path_finder.find_end_nodes()
+    end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
+    print("================================================"*2)
+    print("End nodes: ", end_nodes)
+    print("================================================"*2)
+    #test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, end_nodes, True)
+    for end_node in end_nodes:
+        print("Searching paths from end node: ", end_node)
+
+        # Set timeout for this search (10 seconds)
+        path_finder.search_start_time = time.time()
+        path_finder.search_timeout_seconds = args.timeout
+        
+        try:
+            path_finder.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
+                                        current_node=end_node, \
+                                        connected_components=[], \
+                                        visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
+                                        visited_contigs={NodeUtils.get_contig(end_node)}, \
+                                        depth=0)
+        except TimeoutException as e:
+            print(f"Timeout occurred after {time.time() - path_finder.search_start_time:.2f} seconds, skipping this end node: {e}")
+            print("Restarting with a filtered graph...")
+            graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
+            graph, weights, nodes, _, dict_node_outgoing_edges = graph_builder.build(filter_num=20)
+            path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
+
+            path_finder.search_start_time = time.time()
+            path_finder.search_timeout_seconds = 300
+            try:
+                path_finder.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
+                                             current_node=end_node, \
+                                             connected_components=[], \
+                                             visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
+                                             visited_contigs={NodeUtils.get_contig(end_node)}, \
+                                             depth=0)
+            except TimeoutException as e:
+                print(f"Timeout occurred after {time.time() - path_finder.search_start_time:.2f} seconds, skipping this end node: {e}")
+                break
+    
+    first_pass_results = path_finder.best_score_component['component']
+    first_pass_results = path_finder.sort_component(first_pass_results)
+    _, _, first_pass_scores = path_finder.component_score(first_pass_results)
+    #first_pass_results_connected = path_finder.sort_component(first_pass_results_connected)
+    print(first_pass_results)
+    print(first_pass_scores)
+    #print(first_pass_results_connected)
+    print("##########################################"*2)
+    
+    if args.second_pass and len(first_pass_results) > 1:
+        print("Try connect with previously filtered edges")
+        graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
+        graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores)
+        print("graph_2nd_pass", "--------------------------------"*2)
+        for ele in graph_2nd_pass:
+            print(ele, graph_2nd_pass[ele])
+        print("--------------------------------"*2)
+        for key in weights_2nd_pass:
+            print("weights_2nd_pass", key, weights_2nd_pass[key])
+        print("--------------------------------"*2)
+        for key in dict_node_outgoing_edges_2nd_pass:
+            print("dict_node_outgoing_edges_2nd_pass", key, dict_node_outgoing_edges_2nd_pass[key])
+        print("--------------------------------"*2)
+        for ele in nodes_2nd_pass:
+            print("nodes_2nd_pass", ele)
+        print("--------------------------------"*2)
+        for ele in graph_builder_2nd_pass.dict_compressed_2_component:
+            print("dict_compressed_2_component", ele, graph_builder_2nd_pass.dict_compressed_2_component[ele])
+        print("--------------------------------"*2)
+
+        path_finder_2nd = PathFinder(graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass)
+        end_nodes_2nd = path_finder_2nd.find_end_nodes_unvisited(visited_nodes=set())
+
+        for end_node in end_nodes_2nd:
+            print("Searching paths from end node: ", end_node)
+            path_finder_2nd.search_start_time = time.time()
+            path_finder_2nd.search_timeout_seconds = args.timeout
+            try:
+                path_finder_2nd.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
+                                                 current_node=end_node, \
+                                                 connected_components=[], \
+                                                 visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
+                                                 visited_contigs={NodeUtils.get_contig(end_node)}, \
+                                                 depth=0)
+            except TimeoutException as e:
+                print(f"Timeout occurred after {time.time() - path_finder_2nd.search_start_time:.2f} seconds, skipping this end node: {e}")
+                print("Restarting with a filtered graph...")
+                graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
+                graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores, filter_num=40)
+                path_finder_2nd = PathFinder(graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass)
+
+                path_finder_2nd.search_start_time = time.time()
+                path_finder_2nd.search_timeout_seconds = 300
+                try:
+                    path_finder_2nd.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
+                                                 current_node=end_node, \
+                                                 connected_components=[], \
+                                                 visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
+                                                 visited_contigs={NodeUtils.get_contig(end_node)}, \
+                                                 depth=0)
+                except TimeoutException as e:
+                    print(f"Timeout occurred after {time.time() - path_finder_2nd.search_start_time:.2f} seconds, skipping this end node: {e}")
+                    break
+
+        print("--------------------------------"*2)
+        print("dict_compressed_2_component", graph_builder_2nd_pass.dict_compressed_2_component)
+        print("--------------------------------"*2)
+        second_pass_results = path_finder_2nd.best_score_component['component']
+        _, _, second_pass_scores = path_finder_2nd.component_score(second_pass_results)
+        second_pass_results = graph_builder_2nd_pass.decompress_component(second_pass_results)
+        second_pass_results = path_finder_2nd.sort_component(second_pass_results)
+        print(second_pass_results)
+        print(second_pass_scores)
+
+        components = []
+        agp_assembler = AGPAssembler(args.path)
+        for path in second_pass_results:
+            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            components.append(all_segments)
+
+    else:
+        # Process the first pass results without second pass
+        components = []
+        agp_assembler = AGPAssembler(args.path)
+        for path in first_pass_results:
+            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            components.append(all_segments)
+
+    # Assemble components into a single AGP file
+    output_agp(components, args.contig_fasta, args.output)
+
+    if args.ref_path:
+        relevant_samples = set()
+        for component in components:
+            for segment in component:
+                if segment['component_id'].split("_")[0] in samples:
+                    relevant_samples.add(segment['component_id'].split("_")[0])
+        relevant_samples = sorted(list(relevant_samples))
+        
+        print(f"Relevant samples: {relevant_samples}")
+        print(f"Relevant sequences saved to {args.output}.relevant_seq.fasta...")
+        sequence_collector = SequenceCollector(args.ref_path)
+        sequence_collector.collect(relevant_samples, args.contig_fasta, args.output)
+
+        old_stdout = sys.stdout
+        output_path = args.output + ".patch.fasta"
+        with open(output_path, "w") as out_f:
+            sys.stdout = out_f
+            input_args = argparse.Namespace(agp=args.output + ".agp", components=args.output + ".relevant_seq.fasta")
+            ragtag_agp2fa.main(input_args)
+        sys.stdout = old_stdout
+    
+
+if __name__ == "__main__":
+    main()

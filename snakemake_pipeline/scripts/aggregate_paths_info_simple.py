@@ -143,6 +143,115 @@ class EdgeAggregator:
         best_model = models[best_k]
         return best_model, best_k+1
     
+    def _extract_gmm_candidates(self, means, stds, dists, scores, relevant_samples):
+        """Extract best candidate for each GMM component within bounds."""
+        gmm_scores, gmm_samples, gmm_dists = [], [], []
+        
+        for mean, std in zip(means, stds):
+            upper_bound = mean + GMMConfig.STD_MULTIPLIER * std
+            lower_bound = mean - GMMConfig.STD_MULTIPLIER * std
+            if lower_bound < 0 and mean > 0:
+                lower_bound = mean - std
+            
+            # Find candidates within bounds
+            candidate_dists = []
+            candidate_scores = []
+            candidate_samples = []
+            for idx in range(len(dists)):
+                if lower_bound <= dists[idx] <= upper_bound:
+                    candidate_dists.append(dists[idx])
+                    candidate_scores.append(scores[idx])
+                    candidate_samples.append(relevant_samples[idx])
+            
+            if len(candidate_dists) > 0:
+                best_close_idx = np.argmax(candidate_scores)
+                gmm_scores.append(candidate_scores[best_close_idx])
+                gmm_samples.append(candidate_samples[best_close_idx])
+                gmm_dists.append(candidate_dists[best_close_idx])
+        
+        return gmm_scores, gmm_samples, gmm_dists
+    
+    def _select_with_fallback(self, gmm_scores, gmm_samples, gmm_dists, stds,
+                              scores, dists, relevant_samples):
+        """
+        Select best candidate, applying fallback strategies if low confidence.
+        Returns (selected_idx, selected_score, selected_sample, selected_distance)
+        """
+        # Initial selection from GMM results
+        final_selected_idx = np.argmax(gmm_scores)
+        max_score = max(gmm_scores)
+        
+        # High confidence - return immediately
+        if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE or 
+            stds[final_selected_idx] <= GMMConfig.LARGE_STD_THRESHOLD):
+            selected_sample = gmm_samples[final_selected_idx]
+            selected_distance = gmm_dists[final_selected_idx]
+            print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
+            return (final_selected_idx, gmm_scores[final_selected_idx], 
+                   selected_sample, selected_distance)
+        
+        # Low confidence - try fallback strategies
+        print(f"std: {stds[final_selected_idx]} is too large, try others")
+        
+        # Strategy 1: Smaller std components
+        smaller_scores = []
+        smaller_idx = []
+        for gmm_idx, std in enumerate(stds):
+            if std < GMMConfig.LARGE_STD_THRESHOLD:
+                smaller_scores.append(gmm_scores[gmm_idx])
+                smaller_idx.append(gmm_idx)
+        
+        if len(smaller_scores) > 0:
+            final_selected_idx = smaller_idx[np.argmax(smaller_scores)]
+            selected_sample = gmm_samples[final_selected_idx]
+            selected_distance = gmm_dists[final_selected_idx]
+            print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
+            return (final_selected_idx, gmm_scores[final_selected_idx], 
+                   selected_sample, selected_distance)
+        
+        # Strategy 2: Close to zero distance
+        print(f"NO SMALLER STD FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
+        small_max_score = 0
+        small_idx = -1
+        for idx_dist, dist in enumerate(dists):
+            if abs(dist) < GMMConfig.CLOSE_TO_ZERO_DISTANCE:
+                if scores[idx_dist] > small_max_score:
+                    small_max_score = scores[idx_dist]
+                    small_idx = idx_dist
+        
+        if small_idx != -1 and small_max_score > max_score * GMMConfig.SCORE_RATIO_THRESHOLD:
+            final_selected_idx = small_idx
+            max_score = small_max_score
+            print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
+            return (final_selected_idx, max_score, 
+                   relevant_samples[final_selected_idx], dists[final_selected_idx])
+        
+        # Strategy 3: Top scores with smallest distance
+        print(f"NO SMALLER SCORE FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
+        top_10_score = sorted(scores, reverse=True)[:GMMConfig.TOP_SCORES_COUNT]
+        print(f"Top 10 score: {top_10_score})")
+        small_max_dist = gmm_dists[final_selected_idx]
+        small_idx = -1
+        for idx_score, score in enumerate(scores):
+            if score in top_10_score:
+                if dists[idx_score] < small_max_dist:
+                    small_max_dist = dists[idx_score]
+                    small_idx = idx_score
+        
+        if small_idx != -1:
+            final_selected_idx = small_idx
+            max_score = scores[final_selected_idx]
+            print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
+            return (final_selected_idx, max_score, 
+                   relevant_samples[final_selected_idx], dists[final_selected_idx])
+        
+        # Final fallback: Use original GMM selection
+        selected_sample = gmm_samples[final_selected_idx]
+        selected_distance = gmm_dists[final_selected_idx]
+        print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
+        return (final_selected_idx, gmm_scores[final_selected_idx], 
+               selected_sample, selected_distance)
+    
     def aggregate(self):
         """
         edges:
@@ -168,87 +277,30 @@ class EdgeAggregator:
                 dists = [d for s, d in info[1]]
                 relevant_samples = info[0]
                 if len(relevant_samples) > GMMConfig.MIN_SAMPLES:
+                    # Fit GMM model
                     gmm, best_k = self.fit_gmm(np.array(dists))
                     means = gmm.means_.flatten()
                     stds = np.sqrt(gmm.covariances_.flatten())  # for 1D case
                     print(f"====================================== Best k: {best_k} ======================================")
                     print(f"======== pair: {pair} ========")
                     print(f"GMM means: {means}, stds: {stds}")
-                    gmm_scores = []
-                    gmm_samples = []
-                    gmm_dists = []
-                    for mean, std in zip(means, stds):
-                        candidate_dists = []
-                        candidate_scores = []
-                        candidate_samples = []
-                        for idx in range(len(dists)):
-                            upper_bound = mean + GMMConfig.STD_MULTIPLIER * std
-                            lower_bound = mean - GMMConfig.STD_MULTIPLIER * std if mean - GMMConfig.STD_MULTIPLIER * std > 0 and mean > 0 else mean - std
-                            if dists[idx] <= upper_bound and dists[idx] >= lower_bound:
-                                candidate_dists.append(dists[idx])
-                                candidate_scores.append(scores[idx])
-                                candidate_samples.append(relevant_samples[idx])
-                        if len(candidate_dists) > 0:
-                            best_close_idx = np.argmax(candidate_scores)
-                            gmm_scores.append(candidate_scores[best_close_idx])
-                            gmm_samples.append(candidate_samples[best_close_idx])
-                            gmm_dists.append(candidate_dists[best_close_idx])
-
-                    final_selected_idx = np.argmax(gmm_scores)
-                    max_score = max(gmm_scores)
-                    if max_score < GMMConfig.LOW_CONFIDENCE_SCORE and stds[final_selected_idx] > GMMConfig.LARGE_STD_THRESHOLD: # low confidence, check the distribution of the distances
-                        print(f"std: {stds[final_selected_idx]} is too large, try others")
-                        smaller_scores = []
-                        smaller_idx = []
-                        for gmm_idx, (mean, std) in enumerate(zip(means, stds)):
-                            if std < GMMConfig.LARGE_STD_THRESHOLD:
-                                smaller_scores.append(gmm_scores[gmm_idx])
-                                smaller_idx.append(gmm_idx)
-                        if len(smaller_scores) > 0:
-                            final_selected_idx = smaller_idx[np.argmax(smaller_scores)]
-                        else:
-                            print(f"NO SMALLER STD FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
-                            """Try to select the highest score among the candidates closer to 0 with distance"""
-
-                            small_max_score = 0
-                            small_idx = -1
-                            for idx_dist, dist in enumerate(dists):
-                                if abs(dist) < GMMConfig.CLOSE_TO_ZERO_DISTANCE:
-                                    if scores[idx_dist] > small_max_score:
-                                        small_max_score = scores[idx_dist]
-                                        small_idx = idx_dist
-                            if small_idx != -1 and small_max_score > max_score * GMMConfig.SCORE_RATIO_THRESHOLD:
-                                final_selected_idx = small_idx
-                                max_score = small_max_score
-                                print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
-                                self.edges[pair] = [len(relevant_samples), max_score, relevant_samples[final_selected_idx], dists[final_selected_idx]]
-                            else:
-                                print(f"NO SMALLER SCORE FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
-                                top_10_score = sorted(scores, reverse=True)[:GMMConfig.TOP_SCORES_COUNT]
-                                print(f"Top 10 score: {top_10_score})")
-                                small_max_dist = gmm_dists[final_selected_idx]
-                                small_idx = -1
-                                for idx_score, score in enumerate(scores):
-                                    if score in top_10_score:
-                                        if dists[idx_score] < small_max_dist:
-                                            small_max_dist = dists[idx_score]
-                                            small_idx = idx_score
-                                if small_idx != -1:
-                                    final_selected_idx = small_idx
-                                    max_score = scores[final_selected_idx]
-                                    print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
-                                    self.edges[pair] = [len(relevant_samples), max_score, relevant_samples[final_selected_idx], dists[final_selected_idx]]
-                                else:
-                                    selected_sample = gmm_samples[final_selected_idx]
-                                    selected_distance = gmm_dists[final_selected_idx]
-                                    print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
-                                    self.edges[pair] = [len(relevant_samples), gmm_scores[final_selected_idx], selected_sample, selected_distance] 
-
-                    else:
-                        selected_sample = gmm_samples[final_selected_idx]
-                        selected_distance = gmm_dists[final_selected_idx]
-                        print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
-                        self.edges[pair] = [len(relevant_samples), gmm_scores[final_selected_idx], selected_sample, selected_distance]
+                    
+                    # Extract candidates from GMM components
+                    gmm_scores, gmm_samples, gmm_dists = self._extract_gmm_candidates(
+                        means, stds, dists, scores, relevant_samples
+                    )
+                    
+                    # Select best candidate with fallback if needed
+                    selected_idx, selected_score, selected_sample, selected_dist = \
+                        self._select_with_fallback(
+                            gmm_scores, gmm_samples, gmm_dists, stds,
+                            scores, dists, relevant_samples
+                        )
+                    
+                    self.edges[pair] = [
+                        len(relevant_samples), selected_score, 
+                        selected_sample, selected_dist
+                    ]
                 else:
                     idx = np.argmax(scores)
                     self.edges[pair] = [len(relevant_samples), scores[idx], relevant_samples[idx], dists[idx]]
@@ -467,7 +519,7 @@ class GraphBuilder:
         """
         Decompress the component by replacing the compressed nodes with the original nodes
         """
-        def invert_path(self, path: List[str]) -> List[str]:
+        def invert_path(path: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
             new_path = []
             for edge in path[::-1]:
                 new_path.append((edge[1], edge[0]))
@@ -481,7 +533,7 @@ class GraphBuilder:
                     if pair[0].endswith("_b"):
                         new_path += self.dict_compressed_2_component[pair[0][:-2]]
                     else:
-                        new_path += invert_path(self.dict_compressed_2_component[pair[0][:-2]])
+                        new_path += invert_path( self.dict_compressed_2_component[pair[0][:-2]] )
                 else:
                     new_path.append(pair)
             new_component.append(new_path)
@@ -546,7 +598,8 @@ class PathFinder:
         # All nodes are visited -> calculate and record only the best scored path
         if self.num_nodes == len(visited_nodes):
             # CRITICAL: Append a copy of current_path, not a reference
-            connected_components.append(copy.deepcopy(current_path))
+            # Shallow copy is sufficient since tuples are immutable and current_path is never modified in place
+            connected_components.append(list(current_path))
             #print("Traversal completed!")
             score, length, _ = self.component_score(connected_components)
             if score > self.best_score_component['score']:
@@ -557,6 +610,7 @@ class PathFinder:
                     'component': copy.deepcopy(connected_components)
                 }
                 print("best_score_component updated: ", self.best_score_component)
+                print("--------------------------------"*2)
             if length <= self.best_connected_component['length']:
                 if score > self.best_connected_component['score']:
                     # CRITICAL: Store a deep copy, not a reference
@@ -566,7 +620,7 @@ class PathFinder:
                         'component': copy.deepcopy(connected_components)
                     }
                     print("best_connected_component updated: ", self.best_connected_component)
-            #print("--------------------------------"*2)
+                    print("--------------------------------"*2)
             return
 
         # Go to the other end of the same contig / connected contigs
@@ -579,7 +633,8 @@ class PathFinder:
             #print("Reach End!") #, current_path)
             # Reaching the end of this path, start a new path from the remaining end nodes
             # CRITICAL: Append a copy of current_path, not a reference
-            connected_components.append(copy.deepcopy(current_path))
+            # Shallow copy is sufficient since tuples are immutable and current_path is never modified in place
+            connected_components.append(list(current_path))
             remaining_end_nodes = self.find_end_nodes_unvisited(visited_nodes)
             for end_node in remaining_end_nodes:
                 #print("---" * depth + '||', len(connected_components), "| end_node: ", end_node)
@@ -893,6 +948,7 @@ def main():
     graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
     graph, weights, nodes, dict_edge_info, dict_node_outgoing_edges = graph_builder.build()
     edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
+    """
     print("graph", "--------------------------------"*2)
     for ele in graph:
         print(ele, graph[ele])
@@ -903,15 +959,9 @@ def main():
     for ele in edges_sorted:
         print(ele)
     print("--------------------------------"*2)
-
+    """
 
     path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
-    #end_nodes = path_finder.find_end_nodes()
-    end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
-    print("================================================"*2)
-    print("End nodes: ", end_nodes)
-    print("================================================"*2)
-    #test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, end_nodes, True)
     graph_config = GraphBuildConfig(
         edges=edges,
         weight_type=weight_type,
@@ -939,6 +989,7 @@ def main():
         print("Try connect with previously filtered edges")
         graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
         graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, _, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores)
+        """
         print("graph_2nd_pass", "--------------------------------"*2)
         for ele in graph_2nd_pass:
             print(ele, graph_2nd_pass[ele])
@@ -955,11 +1006,9 @@ def main():
         for ele in graph_builder_2nd_pass.dict_compressed_2_component:
             print("dict_compressed_2_component", ele, graph_builder_2nd_pass.dict_compressed_2_component[ele])
         print("--------------------------------"*2)
-
+        """
 
         path_finder_2nd = PathFinder(graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass)
-        end_nodes_2nd = path_finder_2nd.find_end_nodes_unvisited(visited_nodes=set())
-
         graph_config_2nd = GraphBuildConfig(
             edges=edges,
             weight_type=weight_type,
@@ -972,7 +1021,7 @@ def main():
             first_pass_results=first_pass_results,
             first_pass_scores=first_pass_scores
         )
-        path_finder_2nd = run_path_search_with_retry(path_finder_2nd, graph_config_2nd, args.timeout, args.retry_timeout, GraphConfig.RETRY_FILTER_NUM_SECOND_PASS)
+        path_finder_2nd = run_path_search_with_retry(path_finder_2nd, graph_config_2nd, args.timeout, args.retry_timeout)
 
         print("--------------------------------"*2)
         print("dict_compressed_2_component", graph_builder_2nd_pass.dict_compressed_2_component)

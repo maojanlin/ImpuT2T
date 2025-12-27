@@ -16,7 +16,7 @@ import sys
 
 import time
 
-
+from dataclasses import dataclass
 class TimeoutException(Exception):
     pass
 
@@ -70,8 +70,30 @@ class NodeUtils:
             nodes.update(NodeUtils.get_both_ends(contig))
         return nodes
 
+# ==================== Graph Builder ====================
+@dataclass
+class GraphBuildConfig:
+    """Configuration for building graphs"""
+    edges: dict
+    weight_type: int
+    weight_ratio: float
+    AS_threshold: int
+    AF_threshold: float
+    contig_fasta: str
+    sample_size: int
+    filter_num: int = 20
+    first_pass_results: list[list[str]] = None
+    first_pass_scores: list[float] = None
+    
+    def build_graph(self):
+        """Build a graph with these parameters"""
+        graph_builder = GraphBuilder(self.edges, self.weight_type, self.weight_ratio, self.AS_threshold, self.AF_threshold, self.contig_fasta, self.sample_size)
+        if self.first_pass_results is not None and self.first_pass_scores is not None:
+            return graph_builder.build_with_results(self.first_pass_results, self.first_pass_scores, filter_num=self.filter_num)
+        else:
+            return graph_builder.build(filter_num=self.filter_num)
 
-
+# ==================== Edge Aggregator ====================
 class EdgeAggregator:
     def __init__(self, input_path: str, samples: list[str], gmm: bool):
         self.input_path = input_path
@@ -463,12 +485,18 @@ class GraphBuilder:
             e_node = f"{contig}_e"
             self.weights[(b_node, e_node)] = 0 #self.contig_lengths[contig]/1000
             self.weights[(e_node, b_node)] = 0 #self.contig_lengths[contig]/1000
-        return self.graph, self.weights, self.nodes, self.dict_node_outgoing_edges
+        return self.graph, self.weights, self.nodes, self.dict_edge_info, self.dict_node_outgoing_edges
 
     def decompress_component(self, component):
         """
         Decompress the component by replacing the compressed nodes with the original nodes
         """
+        def invert_path(self, path: List[str]) -> List[str]:
+            new_path = []
+            for edge in path[::-1]:
+                new_path.append((edge[1], edge[0]))
+            return new_path
+
         new_component = []
         for path in component:
             new_path = []
@@ -477,7 +505,7 @@ class GraphBuilder:
                     if pair[0].endswith("_b"):
                         new_path += self.dict_compressed_2_component[pair[0][:-2]]
                     else:
-                        new_path += self.dict_compressed_2_component[pair[0][:-2]][::-1]
+                        new_path += invert_path(self.dict_compressed_2_component[pair[0][:-2]])
                 else:
                     new_path.append(pair)
             new_component.append(new_path)
@@ -543,7 +571,7 @@ class PathFinder:
         if self.num_nodes == len(visited_nodes):
             # CRITICAL: Append a copy of current_path, not a reference
             connected_components.append(copy.deepcopy(current_path))
-            print("Traversal completed!")
+            #print("Traversal completed!")
             score, length, _ = self.component_score(connected_components)
             if score > self.best_score_component['score']:
                 # CRITICAL: Store a deep copy, not a reference (connected_components will continue to be modified)
@@ -562,7 +590,7 @@ class PathFinder:
                         'component': copy.deepcopy(connected_components)
                     }
                     print("best_connected_component updated: ", self.best_connected_component)
-            print("--------------------------------"*2)
+            #print("--------------------------------"*2)
             return
 
         # Go to the other end of the same contig / connected contigs
@@ -572,20 +600,19 @@ class PathFinder:
 
         
         if len(unvisited_edges) == 0:
-            print("Reach End!") #, current_path)
+            #print("Reach End!") #, current_path)
             # Reaching the end of this path, start a new path from the remaining end nodes
             # CRITICAL: Append a copy of current_path, not a reference
             connected_components.append(copy.deepcopy(current_path))
             remaining_end_nodes = self.find_end_nodes_unvisited(visited_nodes)
             for end_node in remaining_end_nodes:
-                print("---" * depth + '||', len(connected_components), "| end_node: ", end_node)
-
+                #print("---" * depth + '||', len(connected_components), "| end_node: ", end_node)
                 new_path = [(end_node, NodeUtils.get_opposite(end_node))]
                 new_visited_nodes = visited_nodes.union([end_node, NodeUtils.get_opposite(end_node)])
                 new_visited_contigs = visited_contigs.union([NodeUtils.get_contig(end_node)])
                 # CRITICAL: Use deep copy - shallow copy only copies the outer list, inner lists are still references
                 self.search_paths_DFS(new_path, end_node, copy.deepcopy(connected_components), new_visited_nodes, new_visited_contigs, depth + 1)
-            print("---" * depth + '||', current_node)
+            #print("---" * depth + '||', current_node)
             return
 
         # Keep traversing the outgoing edges
@@ -596,7 +623,7 @@ class PathFinder:
             # CRITICAL: Must copy connected_components here! All recursive calls share the same list otherwise
             # When one call appends to connected_components (line 739), all other calls see that change
             self.search_paths_DFS(new_path, outgoing_edge[0], copy.deepcopy(connected_components), new_visited_nodes, new_visited_contigs, depth + 1)        
-        print("---" * depth + '|', current_node)
+        #print("---" * depth + '|', current_node)
         return
 
     def component_score(self, component: List[List[str]]) -> float:
@@ -744,66 +771,6 @@ class SequenceCollector:
                         out_f.write('\n')
         return output_path + ".relevant_seq.fasta"
     
-def run_path_search_with_retry(
-    path_finder: PathFinder,
-    initial_timeout: int = 300,
-    retry_timeout: int = 300,
-    filter_num: int = 20,
-) -> PathFinder:
-    """
-    Run path search with timeout handling and automatic retry.
-    
-    Args:
-        path_finder: PathFinder instance to use
-        initial_timeout: Initial timeout in seconds (default 300)
-        retry_timeout: Timeout for retry attempt in seconds (default 300)
-    
-    Returns:
-        path_finder if search completed successfully, partially searched path_finder if timed out
-    """
-    end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
-
-    # Initial attempt
-    path_finder.search_start_time = time.time()
-    path_finder.search_timeout_seconds = initial_timeout
-    
-    for end_node in end_nodes:
-        try:
-            path_finder.search_paths_DFS(
-                current_path=[(end_node, NodeUtils.get_opposite(end_node))],
-                current_node=end_node,
-                connected_components=[],
-                visited_nodes={end_node, NodeUtils.get_opposite(end_node)},
-                visited_contigs={NodeUtils.get_opposite(end_node)},
-                depth=0
-            )
-        except TimeoutException as e:
-            elapsed = time.time() - path_finder.search_start_time
-            print(f"Timeout occurred after {elapsed:.2f} seconds: {e}")
-            # Retry with filtered graph
-            print("Restarting with a filtered graph...")
-            graph_builder = GraphBuilder(path_finder.edges, path_finder.weight_type, path_finder.weight_ratio, path_finder.AS_threshold, path_finder.AF_threshold, path_finder.contig_fasta, len(path_finder.samples))
-            graph, weights, nodes, dict_node_outgoing_edges = graph_builder.build(filter_num=filter_num)
-            path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
-
-            path_finder.search_start_time = time.time()
-            path_finder.search_timeout_seconds = retry_timeout
-            end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
-            for end_node in end_nodes:
-                try:
-                    path_finder.search_paths_DFS(
-                        current_path=[(end_node, NodeUtils.get_opposite(end_node))],
-                        current_node=end_node,
-                        connected_components=[],
-                        visited_nodes={end_node, NodeUtils.get_opposite(end_node)},
-                        visited_contigs={NodeUtils.get_contig(end_node)},
-                        depth=0
-                    )
-                    return path_finder
-                except TimeoutException as e2:
-                    elapsed2 = time.time() - path_finder.search_start_time
-                    print(f"Retry timeout occurred after {elapsed2:.2f} seconds: {e2}")
-                    return path_finder
 
 def output_agp(components, contig_fasta_path, output_path):
     pragma_line = f"## agp-version {get_ragtag_version()}"
@@ -854,8 +821,67 @@ def output_agp(components, contig_fasta_path, output_path):
             else:  # unplaced
                 f.write(f"{item_id}\t1\t{contig_lengths[item_id]}\t1\tW\t{item_id}\t1\t{contig_lengths[item_id]}\t+\n")
 
+def run_path_search_with_retry(
+    path_finder: PathFinder,
+    graph_config: GraphBuildConfig,
+    initial_timeout: int = 300,
+    retry_timeout: int = 300,
+    filter_num: int = 20,
+    ) -> PathFinder:
+    """
+    Run path search with timeout handling and automatic retry.
+    Args:
+        path_finder: PathFinder instance to use
+        initial_timeout: Initial timeout in seconds (default 300)
+        retry_timeout: Timeout for retry attempt in seconds (default 300)
 
-def main():
+    Returns:
+        path_finder if search completed successfully, partially searched path_finder if timed out
+    """
+    end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
+
+    # Initial attempt
+    path_finder.search_start_time = time.time()
+    path_finder.search_timeout_seconds = initial_timeout
+    for end_node in end_nodes:
+        try:
+            path_finder.search_paths_DFS(
+                current_path=[(end_node, NodeUtils.get_opposite(end_node))],
+                current_node=end_node,
+                connected_components=[],
+                visited_nodes={end_node, NodeUtils.get_opposite(end_node)},
+                visited_contigs={NodeUtils.get_opposite(end_node)},
+                depth=0
+            )
+            return path_finder
+        except TimeoutException as e:
+            elapsed = time.time() - path_finder.search_start_time
+            print(f"Timeout occurred after {elapsed:.2f} seconds: {e}")
+            # Retry with filtered graph
+            print("Restarting with a filtered graph...")
+            graph, weights, nodes, _, dict_node_outgoing_edges = graph_config.build_graph()
+            path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
+            path_finder.search_start_time = time.time()
+            path_finder.search_timeout_seconds = retry_timeout
+            #end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
+            for end_node in end_nodes:
+                try:
+                    path_finder.search_paths_DFS(
+                        current_path=[(end_node, NodeUtils.get_opposite(end_node))],
+                        current_node=end_node,
+                        connected_components=[],
+                        visited_nodes={end_node, NodeUtils.get_opposite(end_node)},
+                        visited_contigs={NodeUtils.get_contig(end_node)},
+                        depth=0
+                    )
+                    return path_finder
+                except TimeoutException as e2:
+                    elapsed2 = time.time() - path_finder.search_start_time
+                    print(f"Retry timeout occurred after {elapsed2:.2f} seconds: {e2}")
+                    return path_finder
+
+
+def main():                        
     parser = argparse.ArgumentParser("impuT2T patching version: " + get_impuT2T_version())
     parser.add_argument("-p", "--path", required=True, help="Input path")
     parser.add_argument("-l", "--list_sample", required=True, help="file containing list of samples")
@@ -910,39 +936,17 @@ def main():
     print("End nodes: ", end_nodes)
     print("================================================"*2)
     #test_results = path_finder.search_paths([], [], set(), set(), edges_sorted, end_nodes, True)
-    for end_node in end_nodes:
-        print("Searching paths from end node: ", end_node)
+    graph_config = GraphBuildConfig(
+        edges=edges,
+        weight_type=weight_type,
+        weight_ratio=args.weight_ratio,
+        AS_threshold=args.AS_threshold,
+        AF_threshold=args.AF_threshold,
+        contig_fasta=args.contig_fasta,
+        sample_size=len(samples)
+    )
+    path_finder = run_path_search_with_retry(path_finder, graph_config, args.timeout)
 
-        # Set timeout for this search (10 seconds)
-        path_finder.search_start_time = time.time()
-        path_finder.search_timeout_seconds = args.timeout
-        
-        try:
-            path_finder.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
-                                        current_node=end_node, \
-                                        connected_components=[], \
-                                        visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
-                                        visited_contigs={NodeUtils.get_contig(end_node)}, \
-                                        depth=0)
-        except TimeoutException as e:
-            print(f"Timeout occurred after {time.time() - path_finder.search_start_time:.2f} seconds, skipping this end node: {e}")
-            print("Restarting with a filtered graph...")
-            graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
-            graph, weights, nodes, _, dict_node_outgoing_edges = graph_builder.build(filter_num=20)
-            path_finder = PathFinder(graph, weights, nodes, dict_node_outgoing_edges)
-
-            path_finder.search_start_time = time.time()
-            path_finder.search_timeout_seconds = 300
-            try:
-                path_finder.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
-                                             current_node=end_node, \
-                                             connected_components=[], \
-                                             visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
-                                             visited_contigs={NodeUtils.get_contig(end_node)}, \
-                                             depth=0)
-            except TimeoutException as e:
-                print(f"Timeout occurred after {time.time() - path_finder.search_start_time:.2f} seconds, skipping this end node: {e}")
-                break
     
     first_pass_results = path_finder.best_score_component['component']
     first_pass_results = path_finder.sort_component(first_pass_results)
@@ -950,13 +954,14 @@ def main():
     #first_pass_results_connected = path_finder.sort_component(first_pass_results_connected)
     print(first_pass_results)
     print(first_pass_scores)
+
     #print(first_pass_results_connected)
     print("##########################################"*2)
     
     if args.second_pass and len(first_pass_results) > 1:
         print("Try connect with previously filtered edges")
         graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
-        graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores)
+        graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, _, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores)
         print("graph_2nd_pass", "--------------------------------"*2)
         for ele in graph_2nd_pass:
             print(ele, graph_2nd_pass[ele])
@@ -974,39 +979,23 @@ def main():
             print("dict_compressed_2_component", ele, graph_builder_2nd_pass.dict_compressed_2_component[ele])
         print("--------------------------------"*2)
 
+
         path_finder_2nd = PathFinder(graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass)
         end_nodes_2nd = path_finder_2nd.find_end_nodes_unvisited(visited_nodes=set())
 
-        for end_node in end_nodes_2nd:
-            print("Searching paths from end node: ", end_node)
-            path_finder_2nd.search_start_time = time.time()
-            path_finder_2nd.search_timeout_seconds = args.timeout
-            try:
-                path_finder_2nd.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
-                                                 current_node=end_node, \
-                                                 connected_components=[], \
-                                                 visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
-                                                 visited_contigs={NodeUtils.get_contig(end_node)}, \
-                                                 depth=0)
-            except TimeoutException as e:
-                print(f"Timeout occurred after {time.time() - path_finder_2nd.search_start_time:.2f} seconds, skipping this end node: {e}")
-                print("Restarting with a filtered graph...")
-                graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
-                graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores, filter_num=40)
-                path_finder_2nd = PathFinder(graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, dict_node_outgoing_edges_2nd_pass)
-
-                path_finder_2nd.search_start_time = time.time()
-                path_finder_2nd.search_timeout_seconds = 300
-                try:
-                    path_finder_2nd.search_paths_DFS(current_path=[(end_node, NodeUtils.get_opposite(end_node))], \
-                                                 current_node=end_node, \
-                                                 connected_components=[], \
-                                                 visited_nodes={end_node, NodeUtils.get_opposite(end_node)}, \
-                                                 visited_contigs={NodeUtils.get_contig(end_node)}, \
-                                                 depth=0)
-                except TimeoutException as e:
-                    print(f"Timeout occurred after {time.time() - path_finder_2nd.search_start_time:.2f} seconds, skipping this end node: {e}")
-                    break
+        graph_config_2nd = GraphBuildConfig(
+            edges=edges,
+            weight_type=weight_type,
+            weight_ratio=args.weight_ratio,
+            AS_threshold=args.AS_threshold,
+            AF_threshold=args.AF_threshold,
+            contig_fasta=args.contig_fasta,
+            sample_size=len(samples),
+            filter_num=40,
+            first_pass_results=first_pass_results,
+            first_pass_scores=first_pass_scores
+        )
+        path_finder_2nd = run_path_search_with_retry(path_finder_2nd, graph_config_2nd, args.timeout, 300, 40)
 
         print("--------------------------------"*2)
         print("dict_compressed_2_component", graph_builder_2nd_pass.dict_compressed_2_component)

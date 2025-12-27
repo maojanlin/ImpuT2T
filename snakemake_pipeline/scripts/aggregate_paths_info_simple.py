@@ -16,7 +16,32 @@ import sys
 
 import time
 
-from dataclasses import dataclass
+# ==================== Constants ====================
+
+# Simple, frequently-used constants at module level
+DEFAULT_TIMEOUT = 300
+RETRY_TIMEOUT = 300
+CONNECTION_SCORE_MULTIPLIER = 10
+
+# Grouped constants in classes (for organization)
+class GMMConfig:
+    """GMM-related constants for edge selection"""
+    MAX_COMPONENTS = 10
+    WEIGHT_CUTOFF = 0.1
+    MIN_SAMPLES = 10
+    STD_MULTIPLIER = 1.5
+    LOW_CONFIDENCE_SCORE = 3000
+    LARGE_STD_THRESHOLD = 200000  # bp
+    CLOSE_TO_ZERO_DISTANCE = 100000  # bp
+    SCORE_RATIO_THRESHOLD = 0.5
+    TOP_SCORES_COUNT = 10
+
+class GraphConfig:
+    """Graph building constants"""
+    DEFAULT_FILTER_NUM = 200
+    RETRY_FILTER_NUM_FIRST_PASS = 20
+    RETRY_FILTER_NUM_SECOND_PASS = 40
+
 class TimeoutException(Exception):
     pass
 
@@ -102,7 +127,7 @@ class EdgeAggregator:
         self.raw_edges = {}
         self.edges = {}
 
-    def fit_gmm(self, x, max_components=10, cutoff=0.1):
+    def fit_gmm(self, x, max_components=GMMConfig.MAX_COMPONENTS, cutoff=GMMConfig.WEIGHT_CUTOFF):
         bics = []
         models = []
         x = x.reshape(-1, 1)
@@ -142,7 +167,7 @@ class EdgeAggregator:
                 scores = [s for s, d in info[1]]
                 dists = [d for s, d in info[1]]
                 relevant_samples = info[0]
-                if len(relevant_samples) > 10:
+                if len(relevant_samples) > GMMConfig.MIN_SAMPLES:
                     gmm, best_k = self.fit_gmm(np.array(dists))
                     means = gmm.means_.flatten()
                     stds = np.sqrt(gmm.covariances_.flatten())  # for 1D case
@@ -157,8 +182,8 @@ class EdgeAggregator:
                         candidate_scores = []
                         candidate_samples = []
                         for idx in range(len(dists)):
-                            upper_bound = mean + 1.5*std
-                            lower_bound = mean - 1.5*std if mean - 1.5*std > 0 and mean > 0 else mean - std
+                            upper_bound = mean + GMMConfig.STD_MULTIPLIER * std
+                            lower_bound = mean - GMMConfig.STD_MULTIPLIER * std if mean - GMMConfig.STD_MULTIPLIER * std > 0 and mean > 0 else mean - std
                             if dists[idx] <= upper_bound and dists[idx] >= lower_bound:
                                 candidate_dists.append(dists[idx])
                                 candidate_scores.append(scores[idx])
@@ -171,12 +196,12 @@ class EdgeAggregator:
 
                     final_selected_idx = np.argmax(gmm_scores)
                     max_score = max(gmm_scores)
-                    if max_score < 3000 and stds[final_selected_idx] > 200000: # low confidence, check the distribution of the distances, stds[final_selected_idx] > 200000 is to avoid the case that the distance is too large
+                    if max_score < GMMConfig.LOW_CONFIDENCE_SCORE and stds[final_selected_idx] > GMMConfig.LARGE_STD_THRESHOLD: # low confidence, check the distribution of the distances
                         print(f"std: {stds[final_selected_idx]} is too large, try others")
                         smaller_scores = []
                         smaller_idx = []
                         for gmm_idx, (mean, std) in enumerate(zip(means, stds)):
-                            if std < 200000:
+                            if std < GMMConfig.LARGE_STD_THRESHOLD:
                                 smaller_scores.append(gmm_scores[gmm_idx])
                                 smaller_idx.append(gmm_idx)
                         if len(smaller_scores) > 0:
@@ -188,18 +213,18 @@ class EdgeAggregator:
                             small_max_score = 0
                             small_idx = -1
                             for idx_dist, dist in enumerate(dists):
-                                if abs(dist) < 100000:
+                                if abs(dist) < GMMConfig.CLOSE_TO_ZERO_DISTANCE:
                                     if scores[idx_dist] > small_max_score:
                                         small_max_score = scores[idx_dist]
                                         small_idx = idx_dist
-                            if small_idx != -1 and small_max_score > max_score*0.5:
+                            if small_idx != -1 and small_max_score > max_score * GMMConfig.SCORE_RATIO_THRESHOLD:
                                 final_selected_idx = small_idx
                                 max_score = small_max_score
                                 print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
                                 self.edges[pair] = [len(relevant_samples), max_score, relevant_samples[final_selected_idx], dists[final_selected_idx]]
                             else:
                                 print(f"NO SMALLER SCORE FOUND, FORCE TO SELECT THE CLOSEST TO 0!!!!")
-                                top_10_score = sorted(scores, reverse=True)[:10]
+                                top_10_score = sorted(scores, reverse=True)[:GMMConfig.TOP_SCORES_COUNT]
                                 print(f"Top 10 score: {top_10_score})")
                                 small_max_dist = gmm_dists[final_selected_idx]
                                 small_idx = -1
@@ -254,7 +279,7 @@ class GraphBuilder:
         self.contig_avg_length = sum(self.contig_lengths.values()) / len(self.contig_lengths)
         self.dict_compressed_2_component = {}
 
-    def build(self, filter_num: int = 200, filter_type: str = "AF"):
+    def build(self, filter_num: int = GraphConfig.DEFAULT_FILTER_NUM, filter_type: str = "AF"):
         if filter_type == "AF":
             filter_func = lambda x: x[1][0]
         elif filter_type == "AS":
@@ -283,7 +308,7 @@ class GraphBuilder:
         for pair, values in edges_sorted:
             u, v = pair
             AF, AS, _, edge_dist = values
-            w = AF / (2*self.sample_size)
+            w = AF / (2 * self.sample_size)
             
             if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges or add_counter > filter_num:
                 self.filtered_edges.add((u, v))
@@ -304,55 +329,6 @@ class GraphBuilder:
             self.dict_node_outgoing_edges[u].append((v, w))
             self.dict_node_outgoing_edges[v].append((u, w))
 
-
-        """
-        print("EDGES STATISTICS:", len(edges_sorted))
-        for idx, (pair, values) in enumerate(sorted(self.dict_edge_info.items(), key=lambda x: x[1][0])):
-            print(f"{idx+1}. {pair}: {values[0]}, {values[0]/2/self.sample_size:.2f}")
-        print("EDGES STATISTICS:", len(edges_sorted))
-        for idx, (pair, values) in enumerate(sorted(self.dict_edge_info.items(), key=lambda x: x[1][1])):
-            print(f"{idx+1}. {pair}: {values[1]}")
-        print("--------------------------------"*2)
-        """
-
-        """
-        for pair, values in edges_sorted:
-            u, v = pair
-            AF, AS, _, edge_dist = values
-            #w = values[self.weight_type]
-            #w = AS*AF*2/(dict_node_AF_count[u]+dict_node_AF_count[v])
-            #w = AF/(dict_node_AF_count[u]+dict_node_AF_count[v])
-            w = AF / (2*self.sample_size)
-            
-            if AS < self.AS_threshold: # filtering through AS threshold
-                self.filtered_edges.add((u, v))
-                self.filtered_edges.add((v, u))
-                #print(f"Filtered edge AS < AS_threshold: {pair}, values: {values}, AS: {AS}, AS_threshold: {self.AS_threshold}")
-                continue
-            if AF <= self.AF_threshold * self.sample_size * 2: # filtering through AF threshold
-                self.filtered_edges.add((u, v))
-                self.filtered_edges.add((v, u))
-                #print(f"Filtered edge AF <= AF_threshold: {pair}, values: {values}, AF: {AF}, AF_threshold: {self.AF_threshold * self.sample_size * 2}")
-                continue
-            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges:
-                self.filtered_edges.add((u, v))
-                self.filtered_edges.add((v, u))
-                #print(f"Filtered edge in filtered_edges: {pair}, values: {values}, filtered_edges: {self.filtered_edges}")
-                continue
-            print("\t", (u, v), values)
-            # undirected graph assignment
-            self.graph[u].append(v)
-            self.graph[v].append(u)
-            self.weights[(u, v)] = w #- abs(edge_dist/50)
-            self.weights[(v, u)] = w #- abs(edge_dist/50)
-            #self.weights[(u, v)] = w
-            #self.weights[(v, u)] = w
-            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
-
-            self.dict_node_outgoing_edges[u].append((v, w))
-            self.dict_node_outgoing_edges[v].append((u, w))
-        """
-
         for node in self.nodes:
             if node.endswith("_b"):
                 contig = node[:-2]
@@ -372,7 +348,7 @@ class GraphBuilder:
 
 
     # functions for second pass graph building
-    def build_with_results(self, connected_components, connected_components_scores, filter_num: int = 200, filter_type: str = "AF"):
+    def build_with_results(self, connected_components, connected_components_scores, filter_num: int = GraphConfig.DEFAULT_FILTER_NUM, filter_type: str = "AF"):
         if filter_type == "AF":
             filter_func = lambda x: x[1][0]
         elif filter_type == "AS":
@@ -389,7 +365,7 @@ class GraphBuilder:
             if len(component) == 1:
                 continue
             average_order = sum([int(pair[0].split("_")[-2]) for pair in component]) / len(component)
-            average_order += 0.01*int(component[0][0].split("_")[-2])
+            average_order += 0.01 * int(component[0][0].split("_")[-2])
             compressed_name = f"impuT2T_{average_order:.2f}"
             self.dict_compressed_2_component[compressed_name] = component
             u = compressed_name + '_b'
@@ -455,7 +431,7 @@ class GraphBuilder:
         for pair, values in compressed_edges:
             u, v = pair
             AF, AS, *_ = values
-            w = AF / (2*self.sample_size)
+            w = AF / (2 * self.sample_size)
             print("\t", (u, v), values)
             # undirected graph assignment
             self.graph[u].append(v)
@@ -640,7 +616,7 @@ class PathFinder:
             connection_score = 0.0
             for idx in range(len(path) - 1):
                 #print("connection: ", path[idx][1], path[idx+1][0], "weight: ", self.weights.get((path[idx][1], path[idx+1][0]), 0.0))
-                connection_score += self.weights.get((path[idx][1], path[idx+1][0]), 0.0)*10
+                connection_score += self.weights.get((path[idx][1], path[idx+1][0]), 0.0) * CONNECTION_SCORE_MULTIPLIER
                 
             path_score = contig_score + connection_score
             scores.append(path_score)
@@ -826,7 +802,6 @@ def run_path_search_with_retry(
     graph_config: GraphBuildConfig,
     initial_timeout: int = 300,
     retry_timeout: int = 300,
-    filter_num: int = 20,
     ) -> PathFinder:
     """
     Run path search with timeout handling and automatic retry.
@@ -889,7 +864,8 @@ def main():
     parser.add_argument("-wr", "--weight_ratio", help="weight ratio, discard the edge less than ratio of the max weight the same node [0.7]", type=float, default=0.7)
     parser.add_argument("-ast", "--AS_threshold", help="AS threshold, discard the edge less than threshold [6000]", type=int, default=6000)
     parser.add_argument("-aft", "--AF_threshold", help="AF threshold, discard the edge less than threshold [0.005]", type=float, default=0.005)
-    parser.add_argument("--timeout", help="timeout for full path traversal [300(s)]", type=int, default=300)
+    parser.add_argument("--timeout", help=f"timeout for full path traversal [{DEFAULT_TIMEOUT}(s)]", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--retry_timeout", help=f"timeout for retry attempt [{RETRY_TIMEOUT}(s)]", type=int, default=RETRY_TIMEOUT)
     parser.add_argument("--debug", help="debug mode", action="store_true")
     parser.add_argument("--contig_fasta", required=True, help="contig fasta file, needed for unplaced contigs")
     parser.add_argument("--ref_path", help="reference path, only specify if you want the patch fasta output")
@@ -943,9 +919,10 @@ def main():
         AS_threshold=args.AS_threshold,
         AF_threshold=args.AF_threshold,
         contig_fasta=args.contig_fasta,
-        sample_size=len(samples)
+        sample_size=len(samples),
+        filter_num=GraphConfig.RETRY_FILTER_NUM_FIRST_PASS
     )
-    path_finder = run_path_search_with_retry(path_finder, graph_config, args.timeout)
+    path_finder = run_path_search_with_retry(path_finder, graph_config, args.timeout, args.retry_timeout)
 
     
     first_pass_results = path_finder.best_score_component['component']
@@ -991,11 +968,11 @@ def main():
             AF_threshold=args.AF_threshold,
             contig_fasta=args.contig_fasta,
             sample_size=len(samples),
-            filter_num=40,
+            filter_num=GraphConfig.RETRY_FILTER_NUM_SECOND_PASS,
             first_pass_results=first_pass_results,
             first_pass_scores=first_pass_scores
         )
-        path_finder_2nd = run_path_search_with_retry(path_finder_2nd, graph_config_2nd, args.timeout, 300, 40)
+        path_finder_2nd = run_path_search_with_retry(path_finder_2nd, graph_config_2nd, args.timeout, args.retry_timeout, GraphConfig.RETRY_FILTER_NUM_SECOND_PASS)
 
         print("--------------------------------"*2)
         print("dict_compressed_2_component", graph_builder_2nd_pass.dict_compressed_2_component)

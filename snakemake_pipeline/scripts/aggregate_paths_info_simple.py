@@ -331,56 +331,45 @@ class GraphBuilder:
         self.contig_avg_length = sum(self.contig_lengths.values()) / len(self.contig_lengths)
         self.dict_compressed_2_component = {}
 
-    def build(self, filter_num: int = GraphConfig.DEFAULT_FILTER_NUM, filter_type: str = "AF"):
+    def _get_filter_function(self, filter_type: str):
+        """Get filter function for sorting edges."""
         if filter_type == "AF":
-            filter_func = lambda x: x[1][0]
+            return lambda x: x[1][0]
         elif filter_type == "AS":
-            filter_func = lambda x: x[1][1]
+            return lambda x: x[1][1]
         else:
             raise ValueError(f"Invalid filter type: {filter_type}")
-
-        edges_sorted = sorted(self.edges.items(), key=filter_func, reverse=True)
-        for pair, values in edges_sorted:
+    
+    def _build_node_score_and_edge_info(self, edges_to_process):
+        """
+        Build dict_node_score and dict_edge_info from edges.
+        edges_to_process: list of ((u, v), values) tuples
+        """
+        for pair, values in edges_to_process:
             u, v = pair
             w = values[self.weight_type]
             self.dict_node_score[u].append((w, v))
             self.dict_node_score[v].append((w, u))
             self.dict_edge_info[(u, v)] = values
             self.dict_edge_info[(v, u)] = values
-
-        # local edge filtering for each node
-        for node, scores in self.dict_node_score.items():
-            max_score = max(scores, key=lambda x: x[0])[0]
-            for score, neighbor in scores:
-                if score < max_score * self.weight_ratio:
-                    self.filtered_edges.add((node, neighbor))
-                    self.filtered_edges.add((neighbor, node))
-
-        add_counter = 0
-        for pair, values in edges_sorted:
-            u, v = pair
-            AF, AS, _, edge_dist = values
-            w = AF / (2 * self.sample_size)
-            
-            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges or add_counter > filter_num:
-                self.filtered_edges.add((u, v))
-                self.filtered_edges.add((v, u))
-                #print(f"Filtered edge in filtered_edges: {pair}, values: {values}, filtered_edges: {self.filtered_edges}")
-                continue
-
-            add_counter += 1
-            print("\t", (u, v), values)
-
-            # undirected graph assignment
-            self.graph[u].append(v)
-            self.graph[v].append(u)
-            self.weights[(u, v)] = w
-            self.weights[(v, u)] = w
-            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
-
-            self.dict_node_outgoing_edges[u].append((v, w))
-            self.dict_node_outgoing_edges[v].append((u, w))
-
+    
+    def _add_edge_to_graph(self, u, v, w):
+        """
+        Add an edge to the graph with all necessary updates.
+        """
+        # Undirected graph assignment
+        self.graph[u].append(v)
+        self.graph[v].append(u)
+        self.weights[(u, v)] = w
+        self.weights[(v, u)] = w
+        self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
+        self.dict_node_outgoing_edges[u].append((v, w))
+        self.dict_node_outgoing_edges[v].append((u, w))
+    
+    def _add_internal_edges(self):
+        """
+        Add edges connecting begin and end nodes of the same contig.
+        """
         for node in self.nodes:
             if node.endswith("_b"):
                 contig = node[:-2]
@@ -390,29 +379,45 @@ class GraphBuilder:
                 contig = node[:-2]
                 b_node = f"{contig}_b"
                 self.graph[node].append(b_node)
-        
+    
+    def _add_contig_weights(self, used_contigs=None):
+        """
+        Add weights for traversing within contigs (b->e, e->b).
+        used_contigs: set of contigs to skip (for second pass)
+        """
         for contig in self.contig_lengths:
+            if used_contigs and contig in used_contigs:
+                print(f"contig: {contig} is used in the first stage")
+                continue
             b_node = f"{contig}_b"
             e_node = f"{contig}_e"
-            self.weights[(b_node, e_node)] = self.contig_lengths[contig]/self.contig_avg_length
-            self.weights[(e_node, b_node)] = self.contig_lengths[contig]/self.contig_avg_length
-        return self.graph, self.weights, self.nodes, self.dict_edge_info, self.dict_node_outgoing_edges
+            if used_contigs:
+                # Second pass: set to 0 for used contigs
+                self.weights[(b_node, e_node)] = 0
+                self.weights[(e_node, b_node)] = 0
+            else:
+                # First pass: use normalized length
+                self.weights[(b_node, e_node)] = self.contig_lengths[contig] / self.contig_avg_length
+                self.weights[(e_node, b_node)] = self.contig_lengths[contig] / self.contig_avg_length
+    
+    def _apply_local_edge_filtering(self):
+        """
+        Apply local edge filtering based on weight ratio.
+        """
+        for node, scores in self.dict_node_score.items():
+            max_score = max(scores, key=lambda x: x[0])[0]
+            for score, neighbor in scores:
+                if score < max_score * self.weight_ratio:
+                    self.filtered_edges.add((node, neighbor))
+                    self.filtered_edges.add((neighbor, node))
 
-
-    # functions for second pass graph building
-    def build_with_results(self, connected_components, connected_components_scores, filter_num: int = GraphConfig.DEFAULT_FILTER_NUM, filter_type: str = "AF"):
-        if filter_type == "AF":
-            filter_func = lambda x: x[1][0]
-        elif filter_type == "AS":
-            filter_func = lambda x: x[1][1]
-        else:
-            raise ValueError(f"Invalid filter type: {filter_type}")
-
+    def _build_compressed_nodes(self, connected_components, connected_components_scores):
+        """Build compressed nodes from connected components (second pass only)."""
         dict_node_2_compressed = {}
         self.dict_compressed_2_component = {}
         set_used_nodes = set()
         set_used_contigs = set()
-
+        
         for idx, component in enumerate(connected_components):
             if len(component) == 1:
                 continue
@@ -427,29 +432,32 @@ class GraphBuilder:
             for idy in range(len(component)-1):
                 set_used_nodes.update([component[idy][1], component[idy+1][0]])
             set_used_contigs.update([pair[0][:-2] for pair in component])
-
+            
             self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
-
             self.weights[(u, v)] = connected_components_scores[idx]
             self.weights[(v, u)] = connected_components_scores[idx]
-
+        
         print("dict_node_2_compressed", dict_node_2_compressed)
         print("set_used_contigs", set_used_contigs)
         print("set_used_nodes", set_used_nodes)
         print("--------------------------------"*2)
-
-        edges_sorted = sorted(self.edges.items(), key=filter_func, reverse=True)
+        
+        return dict_node_2_compressed, set_used_nodes, set_used_contigs
+    
+    def _compress_edges(self, edges_sorted, dict_node_2_compressed, set_used_nodes, filter_num):
+        """Compress edges based on compressed nodes (second pass only)."""
         compressed_edges = []
         add_counter = 0
+        
         for pair, values in edges_sorted:
             if add_counter > filter_num:
                 self.filtered_edges.add(pair)
                 self.filtered_edges.add(pair[::-1])
                 break
-
+            
             u, v = pair
-            # if one of the nodes is internal compressed node, skip
-            if u in set_used_nodes or v in set_used_nodes: 
+            # Skip if one of the nodes is internal compressed node
+            if u in set_used_nodes or v in set_used_nodes:
                 continue
             elif u in dict_node_2_compressed and v in dict_node_2_compressed:
                 new_u = dict_node_2_compressed[u]
@@ -464,55 +472,69 @@ class GraphBuilder:
             else:
                 compressed_edges.append(((u, v), values))
             add_counter += 1
+        
+        return compressed_edges
 
-        # Add edges and nodes with new name to the graph
-        for pair, values in compressed_edges:
+    def build(self, filter_num: int = GraphConfig.DEFAULT_FILTER_NUM, filter_type: str = "AF"):
+        filter_func = self._get_filter_function(filter_type)
+        edges_sorted = sorted(self.edges.items(), key=filter_func, reverse=True)
+        
+        # Build node scores and edge info
+        self._build_node_score_and_edge_info(edges_sorted)
+        
+        # Apply local edge filtering
+        self._apply_local_edge_filtering()
+        
+        # Process edges and add to graph
+        add_counter = 0 # counter for filtering edges
+        for pair, values in edges_sorted:
             u, v = pair
-            w = values[self.weight_type]
-            self.dict_node_score[u].append((w, v))
-            self.dict_node_score[v].append((w, u))
-            self.dict_edge_info[(u, v)] = values
-            self.dict_edge_info[(v, u)] = values
+            AF, AS, _, edge_dist = values
+            w = AF / (2 * self.sample_size)
+            
+            if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges or add_counter > filter_num:
+                self.filtered_edges.add((u, v))
+                self.filtered_edges.add((v, u))
+                continue
 
-        dict_node_AF_count = defaultdict(int)
-        for pair, values in compressed_edges:
-            AF, AS, *_ = values
-            dict_node_AF_count[pair[0]] += AF
-            dict_node_AF_count[pair[1]] += AF
-
+            add_counter += 1
+            print("\t", (u, v), values)
+            self._add_edge_to_graph(u, v, w)
+        
+        # Add contig edges and weights
+        self._add_internal_edges()
+        self._add_contig_weights()
+        
+        return self.graph, self.weights, self.nodes, self.dict_edge_info, self.dict_node_outgoing_edges
+        
+    def build_with_results(self, connected_components, connected_components_scores, filter_num: int = GraphConfig.DEFAULT_FILTER_NUM, filter_type: str = "AF"):
+        filter_func = self._get_filter_function(filter_type)
+        
+        # Build compressed nodes from connected components (unique to second pass)
+        dict_node_2_compressed, set_used_nodes, set_used_contigs = \
+            self._build_compressed_nodes(connected_components, connected_components_scores)
+        
+        # Process and compress edges (unique to second pass)
+        edges_sorted = sorted(self.edges.items(), key=filter_func, reverse=True)
+        compressed_edges = self._compress_edges(edges_sorted, dict_node_2_compressed, 
+                                                 set_used_nodes, filter_num)
+        
+        # Build node scores and edge info from compressed edges
+        self._build_node_score_and_edge_info(compressed_edges)
+        
+        # Process compressed edges and add to graph
         for pair, values in compressed_edges:
             u, v = pair
             AF, AS, *_ = values
             w = AF / (2 * self.sample_size)
+            
             print("\t", (u, v), values)
-            # undirected graph assignment
-            self.graph[u].append(v)
-            self.graph[v].append(u)
-            self.weights[(u, v)] = w
-            self.weights[(v, u)] = w
-            self.nodes.update([u, v, NodeUtils.get_opposite(u), NodeUtils.get_opposite(v)])
-
-            self.dict_node_outgoing_edges[u].append((v, w))
-            self.dict_node_outgoing_edges[v].append((u, w))
-
-        for node in self.nodes:
-            if node.endswith("_b"):
-                contig = node[:-2]
-                e_node = f"{contig}_e"
-                self.graph[node].append(e_node)
-            elif node.endswith("_e"):
-                contig = node[:-2]
-                b_node = f"{contig}_b"
-                self.graph[node].append(b_node)
+            self._add_edge_to_graph(u, v, w)
         
-        for contig in self.contig_lengths:
-            if contig in set_used_contigs:
-                print(f"contig: {contig} is used in the first stage")
-                continue
-            b_node = f"{contig}_b"
-            e_node = f"{contig}_e"
-            self.weights[(b_node, e_node)] = 0 #self.contig_lengths[contig]/1000
-            self.weights[(e_node, b_node)] = 0 #self.contig_lengths[contig]/1000
+        # Add contig edges and weights (with used_contigs)
+        self._add_internal_edges()
+        self._add_contig_weights(used_contigs=set_used_contigs)
+        
         return self.graph, self.weights, self.nodes, self.dict_edge_info, self.dict_node_outgoing_edges
 
     def decompress_component(self, component):

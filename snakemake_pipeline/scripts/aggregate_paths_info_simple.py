@@ -2,10 +2,10 @@ import argparse
 import os
 import copy
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Set, Tuple, Dict
 from combine_connections import read_agp_file, merge_segments, reverse_segments
-from ragtag_utilities.utilities import run_oae, get_ragtag_version, get_impuT2T_version
+from ragtag_utilities.utilities import get_ragtag_version, get_impuT2T_version
 import ragtag_agp2fa 
 
 os.environ["MKL_THREADING_LAYER"] = "GNU"
@@ -67,33 +67,11 @@ class NodeUtils:
         return node.endswith("_b")
     
     @staticmethod
-    def is_end(node: str) -> bool:
-        """Check if node is an end node (ends with _e)."""
-        return node.endswith("_e")
-    
-    @staticmethod
     def get_opposite(node: str) -> str:
         """Get the opposite end of a contig node."""
         contig = NodeUtils.get_contig(node)
         return f"{contig}_e" if NodeUtils.is_begin(node) else f"{contig}_b"
     
-    @staticmethod
-    def get_both_ends(contig: str) -> Tuple[str, str]:
-        """Get both begin and end nodes for a contig."""
-        return f"{contig}_b", f"{contig}_e"
-    
-    @staticmethod
-    def get_contigs_from_nodes(nodes: List[str]) -> Set[str]:
-        """Extract contig names from a list of nodes."""
-        return {NodeUtils.get_contig(node) for node in nodes}
-    
-    @staticmethod
-    def get_nodes_from_contigs(contigs: Set[str]) -> Set[str]:
-        """Convert contig names to both begin and end nodes."""
-        nodes = set()
-        for contig in contigs:
-            nodes.update(NodeUtils.get_both_ends(contig))
-        return nodes
 
 # ==================== Graph Builder ====================
 @dataclass
@@ -102,8 +80,6 @@ class GraphBuildConfig:
     edges: dict
     weight_type: int
     weight_ratio: float
-    AS_threshold: int
-    AF_threshold: float
     contig_fasta: str
     sample_size: int
     filter_num: int = 20
@@ -112,7 +88,7 @@ class GraphBuildConfig:
     
     def build_graph(self):
         """Build a graph with these parameters"""
-        graph_builder = GraphBuilder(self.edges, self.weight_type, self.weight_ratio, self.AS_threshold, self.AF_threshold, self.contig_fasta, self.sample_size)
+        graph_builder = GraphBuilder(self.edges, self.weight_type, self.weight_ratio, self.contig_fasta, self.sample_size)
         if self.first_pass_results is not None and self.first_pass_scores is not None:
             return graph_builder.build_with_results(self.first_pass_results, self.first_pass_scores, filter_num=self.filter_num)
         else:
@@ -312,12 +288,10 @@ class EdgeAggregator:
         return self.edges
 
 class GraphBuilder:
-    def __init__(self, edges, weight_type, weight_ratio, AS_threshold, AF_threshold, contig_fasta, sample_size):
+    def __init__(self, edges, weight_type, weight_ratio, contig_fasta, sample_size):
         self.edges = edges
         self.weight_type = weight_type
         self.weight_ratio = weight_ratio
-        self.AS_threshold = AS_threshold
-        self.AF_threshold = AF_threshold
         self.sample_size = sample_size
         self.graph = defaultdict(list)
         self.weights = {}
@@ -939,8 +913,8 @@ def main():
     parser.add_argument("-l", "--list_sample", required=True, help="file containing list of samples")
     parser.add_argument("-w", "--weight", help="weight type: allele_freq or max_alignment_score [AF|AS]", default="AS")
     parser.add_argument("-wr", "--weight_ratio", help="weight ratio, discard the edge less than ratio of the max weight the same node [0.7]", type=float, default=0.7)
-    parser.add_argument("-ast", "--AS_threshold", help="AS threshold, discard the edge less than threshold [6000]", type=int, default=6000)
-    parser.add_argument("-aft", "--AF_threshold", help="AF threshold, discard the edge less than threshold [0.005]", type=float, default=0.005)
+    #parser.add_argument("-ast", "--AS_threshold", help="AS threshold, discard the edge less than threshold [6000]", type=int, default=6000)
+    #parser.add_argument("-aft", "--AF_threshold", help="AF threshold, discard the edge less than threshold [0.005]", type=float, default=0.005)
     parser.add_argument("--timeout", help=f"timeout for full path traversal [{DEFAULT_TIMEOUT}(s)]", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--retry_timeout", help=f"timeout for retry attempt [{RETRY_TIMEOUT}(s)]", type=int, default=RETRY_TIMEOUT)
     parser.add_argument("--debug", help="debug mode", action="store_true")
@@ -967,7 +941,7 @@ def main():
         for pair, values in sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2])):
             print(pair, values)
 
-    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
+    graph_builder = GraphBuilder(edges, weight_type, args.weight_ratio, args.contig_fasta, len(samples))
     graph, weights, nodes, dict_edge_info, dict_node_outgoing_edges = graph_builder.build()
     edges_sorted = sorted(edges.items(), key=lambda x: int(x[0][0].split("_")[-2]))
     """
@@ -988,8 +962,6 @@ def main():
         edges=edges,
         weight_type=weight_type,
         weight_ratio=args.weight_ratio,
-        AS_threshold=args.AS_threshold,
-        AF_threshold=args.AF_threshold,
         contig_fasta=args.contig_fasta,
         sample_size=len(samples),
         filter_num=GraphConfig.RETRY_FILTER_NUM_FIRST_PASS
@@ -1009,7 +981,7 @@ def main():
     
     if args.second_pass and len(first_pass_results) > 1:
         print("Try connect with previously filtered edges")
-        graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.AS_threshold, args.AF_threshold, args.contig_fasta, len(samples))
+        graph_builder_2nd_pass = GraphBuilder(edges, weight_type, args.weight_ratio, args.contig_fasta, len(samples))
         graph_2nd_pass, weights_2nd_pass, nodes_2nd_pass, _, dict_node_outgoing_edges_2nd_pass = graph_builder_2nd_pass.build_with_results(first_pass_results, first_pass_scores)
         """
         print("graph_2nd_pass", "--------------------------------"*2)
@@ -1035,8 +1007,6 @@ def main():
             edges=edges,
             weight_type=weight_type,
             weight_ratio=args.weight_ratio,
-            AS_threshold=args.AS_threshold,
-            AF_threshold=args.AF_threshold,
             contig_fasta=args.contig_fasta,
             sample_size=len(samples),
             filter_num=GraphConfig.RETRY_FILTER_NUM_SECOND_PASS,

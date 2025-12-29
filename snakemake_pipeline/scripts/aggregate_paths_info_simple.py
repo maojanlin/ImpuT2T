@@ -700,8 +700,11 @@ class PathFinder:
         
 
 class AGPAssembler:
-    def __init__(self, agp_dir):
+    def __init__(self, agp_dir, contig_fasta):
         self.agp_dir = agp_dir
+        fai = pysam.FastaFile(contig_fasta)
+        self.contig_lengths = {contig: fai.get_reference_length(contig) for contig in fai.references}
+        fai.close()
 
     def find_connection_segments_in_agp(self, agp_path, start_node, end_node) -> tuple[list[dict], bool]:
         def parse_node(node):
@@ -763,6 +766,89 @@ class AGPAssembler:
         print("No valid connection found!!")
         return [], False
 
+    def _calculate_trim(self, segment, is_left, other_orientation):
+        """Calculate trim value for a segment based on orientation, position, and other segment's orientation."""
+        contig_len = self.contig_lengths[segment['component_id']]
+        if segment['orientation'] == '+':
+            # For + orientation: trim is overhang at the right end (left segment) or left end (right segment)
+            if is_left:
+                return contig_len - segment['component_end']
+            else:
+                return segment['component_beg']
+        else:
+            if is_left:
+                return segment['component_beg']
+            else:
+                return contig_len - segment['component_end']
+    
+    def _apply_adjustment(self, segment, offset, is_left, left_orientation, right_orientation):
+        """Apply offset adjustment to segment. Direction depends on both segments' orientations."""
+        # If orientations differ, both segments adjust in the direction of the left segment's orientation
+        if left_orientation != right_orientation:
+            # Mixed orientations: both extend in the direction of the left segment's orientation
+            if left_orientation == '+':
+                segment['component_end'] += offset
+                if is_left:
+                    segment['object_end'] += offset
+                else:
+                    segment['object_beg'] -= offset
+            else:  # left is '-'
+                segment['component_beg'] -= offset
+                if is_left:
+                    segment['object_end'] += offset
+                else:
+                    segment['object_beg'] -= offset
+        else:
+            # Same orientations: left extends in its orientation direction, right extends opposite
+            if is_left:
+                # Left segment: extend in direction of its orientation
+                if segment['orientation'] == '+':
+                    segment['component_end'] += offset
+                    segment['object_end'] += offset
+                else:  # orientation == '-'
+                    segment['component_beg'] -= offset
+                    segment['object_end'] += offset
+            else:
+                # Right segment: extend opposite to its orientation (toward the overlap)
+                if segment['orientation'] == '+':
+                    segment['component_beg'] -= offset
+                    segment['object_beg'] -= offset
+                else:  # orientation == '-'
+                    segment['component_end'] += offset
+                    segment['object_beg'] -= offset
+    
+    def middle_connection_for_overlap_segments(self, segments):
+        if len(segments) == 3: # if it's not overlapping, there are patch segments in the middle
+            return segments
+        elif len(segments) == 2:
+            print("--------------------------------"*2)
+            print("Overlapping segments found!!")
+            for idx, segment in enumerate(segments):
+                print(f"Segment {idx}: {segment}")
+            print("--------------------------------"*2)
+            segment_left, segment_right = segments
+            
+            # Calculate trims based on orientations
+            left_trim = self._calculate_trim(segment_left, is_left=True, other_orientation=segment_right['orientation'])
+            right_trim = self._calculate_trim(segment_right, is_left=False, other_orientation=segment_left['orientation'])
+            
+            # Calculate middle point and offsets
+            middle_trim = int((left_trim + right_trim) / 2)
+            offset_left = left_trim - middle_trim
+            offset_right = right_trim - middle_trim
+
+            # Apply adjustments
+            left_orient = segment_left['orientation']
+            right_orient = segment_right['orientation']
+            self._apply_adjustment(segment_left, offset_left, is_left=True, 
+                                 left_orientation=left_orient, right_orientation=right_orient)
+            self._apply_adjustment(segment_right, -offset_left, is_left=False, 
+                                 left_orientation=left_orient, right_orientation=right_orient)
+            
+            return [segment_left, segment_right]
+        print("Invalid number of segments!!")
+        return []
+
     def extract_and_merge(self, path, dict_edge_info, agp_path):
         all_segments = []
         for idx in range(len(path)-1):
@@ -772,6 +858,7 @@ class AGPAssembler:
             agp_file = agp_path + f"{sample}.agp"
             print(f"AGP connection for {u} -> {v} in sample {sample}:")
             segments, flag_forward = self.find_connection_segments_in_agp(agp_file, u, v)
+            segments = self.middle_connection_for_overlap_segments(segments)
             if segments:
                 if not flag_forward:
                     segments = reverse_segments(segments)
@@ -1026,7 +1113,7 @@ def main():
         print(second_pass_scores)
 
         components = []
-        agp_assembler = AGPAssembler(args.path)
+        agp_assembler = AGPAssembler(args.path, args.contig_fasta)
         for path in second_pass_results:
             all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
             components.append(all_segments)
@@ -1034,7 +1121,7 @@ def main():
     else:
         # Process the first pass results without second pass
         components = []
-        agp_assembler = AGPAssembler(args.path)
+        agp_assembler = AGPAssembler(args.path, args.contig_fasta)
         for path in first_pass_results:
             all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
             components.append(all_segments)

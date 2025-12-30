@@ -1,0 +1,7 @@
+name: ragtag
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - ragtag=2.0.1

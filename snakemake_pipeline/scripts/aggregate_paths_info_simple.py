@@ -158,12 +158,16 @@ class EdgeAggregator:
         max_score = max(gmm_scores)
         
         # High confidence - return immediately
-        if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE or 
+        #if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE or 
+        #    stds[final_selected_idx] <= GMMConfig.LARGE_STD_THRESHOLD):
+        if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE and 
             stds[final_selected_idx] <= GMMConfig.LARGE_STD_THRESHOLD):
-            selected_sample = gmm_samples[final_selected_idx]
+            #print(f"max_score: {max_score}, std: {stds[final_selected_idx]}")
             selected_distance = gmm_dists[final_selected_idx]
-            print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
-            return (final_selected_idx, gmm_scores[final_selected_idx], 
+            selected_sample = gmm_samples[final_selected_idx]
+            selected_score = gmm_scores[final_selected_idx]
+            print(f"Selected sample: {selected_sample}, distance: {selected_distance}, score: {selected_score}")
+            return (final_selected_idx, selected_score, 
                    selected_sample, selected_distance)
         
         # Low confidence - try fallback strategies
@@ -181,8 +185,9 @@ class EdgeAggregator:
             final_selected_idx = smaller_idx[np.argmax(smaller_scores)]
             selected_sample = gmm_samples[final_selected_idx]
             selected_distance = gmm_dists[final_selected_idx]
-            print(f"Selected sample: {selected_sample}, distance: {selected_distance}")
-            return (final_selected_idx, gmm_scores[final_selected_idx], 
+            selected_score = gmm_scores[final_selected_idx]
+            print(f"Selected sample: {selected_sample}, distance: {selected_distance}, score: {selected_score}")
+            return (final_selected_idx, selected_score, 
                    selected_sample, selected_distance)
         
         # Strategy 2: Close to zero distance
@@ -198,7 +203,7 @@ class EdgeAggregator:
         if small_idx != -1 and small_max_score > max_score * GMMConfig.SCORE_RATIO_THRESHOLD:
             final_selected_idx = small_idx
             max_score = small_max_score
-            print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}")
+            print(f"Selected sample: {relevant_samples[final_selected_idx]}, distance: {dists[final_selected_idx]}, score: {max_score}")
             return (final_selected_idx, max_score, 
                    relevant_samples[final_selected_idx], dists[final_selected_idx])
         
@@ -464,7 +469,7 @@ class GraphBuilder:
         for pair, values in edges_sorted:
             u, v = pair
             AF, AS, _, edge_dist = values
-            w = AF / (2 * self.sample_size)
+            w = AF / (2 * self.sample_size) * (AS / 10000)
             
             if (u, v) in self.filtered_edges or (v, u) in self.filtered_edges or add_counter > filter_num:
                 self.filtered_edges.add((u, v))
@@ -500,7 +505,7 @@ class GraphBuilder:
         for pair, values in compressed_edges:
             u, v = pair
             AF, AS, *_ = values
-            w = AF / (2 * self.sample_size)
+            w = AF / (2 * self.sample_size) * (AS / 10000)
             
             print("\t", (u, v), values)
             self._add_edge_to_graph(u, v, w)
@@ -952,12 +957,16 @@ def run_path_search_with_retry(
         path_finder if search completed successfully, partially searched path_finder if timed out
     """
     end_nodes = path_finder.find_end_nodes_unvisited(visited_nodes=set())
+    print("end_nodes: ", end_nodes)
+    print("================================"*2)
 
     # Initial attempt
     path_finder.search_start_time = time.time()
     path_finder.search_timeout_seconds = initial_timeout
     for end_node in end_nodes:
         try:
+            print("end_node: ", end_node)
+            print("--------------------------------"*2)
             path_finder.search_paths_DFS(
                 current_path=[(end_node, NodeUtils.get_opposite(end_node))],
                 current_node=end_node,
@@ -966,7 +975,7 @@ def run_path_search_with_retry(
                 visited_contigs={NodeUtils.get_opposite(end_node)},
                 depth=0
             )
-            return path_finder
+            path_finder.search_start_time = time.time()
         except TimeoutException as e:
             elapsed = time.time() - path_finder.search_start_time
             print(f"Timeout occurred after {elapsed:.2f} seconds: {e}")
@@ -987,11 +996,12 @@ def run_path_search_with_retry(
                         visited_contigs={NodeUtils.get_contig(end_node)},
                         depth=0
                     )
-                    return path_finder
+                    path_finder.search_start_time = time.time()
+                    #return path_finder
                 except TimeoutException as e2:
                     elapsed2 = time.time() - path_finder.search_start_time
                     print(f"Retry timeout occurred after {elapsed2:.2f} seconds: {e2}")
-                    return path_finder
+    return path_finder
 
 
 def main():                        

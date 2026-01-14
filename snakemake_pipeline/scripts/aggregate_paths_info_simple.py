@@ -102,6 +102,7 @@ class EdgeAggregator:
         self.gmm = gmm
         self.raw_edges = {}
         self.edges = {}
+        self.gaussian_info = {}
 
     def fit_gmm(self, x, max_components=GMMConfig.MAX_COMPONENTS, cutoff=GMMConfig.WEIGHT_CUTOFF):
         bics = []
@@ -160,7 +161,7 @@ class EdgeAggregator:
         # High confidence - return immediately
         #if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE or 
         #    stds[final_selected_idx] <= GMMConfig.LARGE_STD_THRESHOLD):
-        if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE and 
+        if (max_score >= GMMConfig.LOW_CONFIDENCE_SCORE or 
             stds[final_selected_idx] <= GMMConfig.LARGE_STD_THRESHOLD):
             #print(f"max_score: {max_score}, std: {stds[final_selected_idx]}")
             selected_distance = gmm_dists[final_selected_idx]
@@ -278,12 +279,17 @@ class EdgeAggregator:
                             scores, dists, relevant_samples
                         )
                     
+                    selected_std = stds[selected_idx] if len(stds) > selected_idx else -1
+                    self.gaussian_info[pair] = [int(selected_std), selected_dist, selected_score, max(scores), selected_sample, \
+                        len(relevant_samples), len(stds)]
                     self.edges[pair] = [
                         len(relevant_samples), selected_score, 
                         selected_sample, selected_dist
                     ]
                 else:
                     idx = np.argmax(scores)
+                    self.gaussian_info[pair] = [-1, dists[idx], scores[idx], max(scores), relevant_samples[idx], \
+                        len(relevant_samples), -1]
                     self.edges[pair] = [len(relevant_samples), scores[idx], relevant_samples[idx], dists[idx]]
         else:
             for pair, info in self.raw_edges.items():
@@ -291,6 +297,8 @@ class EdgeAggregator:
                 self.edges[pair] = [len(info[0]), info[1][idx][0], info[0][idx]]
 
         return self.edges
+
+
 
 class GraphBuilder:
     def __init__(self, edges, weight_type, weight_ratio, contig_fasta, sample_size):
@@ -856,8 +864,11 @@ class AGPAssembler:
 
     def extract_and_merge(self, path, dict_edge_info, agp_path):
         all_segments = []
+        used_pairs = set()
         for idx in range(len(path)-1):
             u, v = path[idx][1], path[idx+1][0]
+            used_pairs.add((u, v))
+            used_pairs.add((v, u))
             edge_info = dict_edge_info[(u, v)]
             sample = edge_info[2]
             agp_file = agp_path + f"{sample}.agp"
@@ -873,7 +884,7 @@ class AGPAssembler:
                 else:
                     print("Fail to merge segments")
                     continue
-        return all_segments
+        return all_segments, used_pairs
     
 class SequenceCollector:
     def __init__(self, ref_path):
@@ -1004,6 +1015,91 @@ def run_path_search_with_retry(
     return path_finder
 
 
+def predict_groundtruth_probability(STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM):
+    """
+    Predict the probability that an edge is in the groundtruth.
+    
+    This function handles all preprocessing steps internally:
+    1. Handles -1 values (missing data)
+    2. Applies log transformations to dist and STD (using stored parameters)
+    3. Scales features using the trained RobustScaler
+    4. Predicts probability using the trained Logistic Regression model
+    
+    Parameters:
+    - STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM: raw feature values
+    
+    Returns:
+    - probability: float between 0 and 1, or np.nan (0) if data is missing (-1 values)
+    
+    Example:
+        prob = predict_groundtruth_probability(
+            STD=1597, dist=133535, chosen_score=8212, 
+            highest_score=8212, num_haplotypes=934, num_GMM=3
+        )
+        print(f"Probability: {prob:.3f}")
+    """
+    # Create feature array in the correct order: [STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM]
+    features = np.array([[STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM]])
+    
+    # Handle -1 values (replace with NaN)
+    features = np.where(features == -1, np.nan, features)
+    
+    # Check if any are NaN (missing data)
+    if np.isnan(features).any():
+        return np.nan  # Can't predict if data is missing
+    
+    # ========================================================================
+    # PARAMETERS (using actual values from trained models)
+    # Note: For standalone use, run the extraction cell above to get hardcoded values
+    # ========================================================================
+    # Transformation parameters (from Cell 6)
+    # These are already defined globally: TRANSFORM_DIST_SHIFT, TRANSFORM_STD_SHIFT
+    
+    # RobustScaler parameters (center_ = median, scale_ = IQR)
+    # Feature order: [STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM]
+    SCALER_CENTER = [1.00550062e+01, 1.56329387e+01, 9.87200000e+03, 9.89400000e+03, \
+                     1.56000000e+02, 2.00000000e+00]
+    SCALER_SCALE = [7.37980227e+00, 2.58544625e-02, 2.69500000e+03, 2.59400000e+03, \
+                    7.60000000e+02, 2.00000000e+00]
+
+    
+    # Logistic Regression coefficients and intercept
+    # Feature order: [STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM]
+    LR_COEFFICIENTS = [ 0.0413856, -0.04917128, 0.354603, 0.33518432, 4.49418352, -0.07634354]
+    LR_INTERCEPT = -1.104513065757794
+    TRANSFORM_DIST_SHIFT = 6126542
+    TRANSFORM_STD_SHIFT = 0
+    
+    # ========================================================================
+    # PREPROCESSING PIPELINE
+    # ========================================================================
+    # 1. Log transform dist and STD using hardcoded shift values
+    if TRANSFORM_DIST_SHIFT > 0:
+        features[0, 1] = np.log1p(features[0, 1] + TRANSFORM_DIST_SHIFT)  # dist
+    else:
+        features[0, 1] = np.log1p(features[0, 1])  # dist
+    
+    if TRANSFORM_STD_SHIFT > 0:
+        features[0, 0] = np.log1p(features[0, 0] + TRANSFORM_STD_SHIFT)  # STD
+    else:
+        features[0, 0] = np.log1p(features[0, 0])  # STD
+    
+    # 2. Apply RobustScaler transformation manually
+    # RobustScaler formula: (X - median) / IQR
+    features_scaled = (features - SCALER_CENTER) / SCALER_SCALE
+    
+    # 3. Apply Logistic Regression manually
+    # Logit = intercept + sum(coefficient * feature)
+    logit = LR_INTERCEPT + np.sum(LR_COEFFICIENTS * features_scaled[0])
+    
+    # Convert logit to probability using sigmoid function
+    probability = 1.0 / (1.0 + np.exp(-logit))
+    
+    return probability
+
+
+
+
 def main():                        
     parser = argparse.ArgumentParser("impuT2T patching version: " + get_impuT2T_version())
     parser.add_argument("-p", "--path", required=True, help="Input path")
@@ -1123,21 +1219,42 @@ def main():
         print(second_pass_scores)
 
         components = []
+        total_used_pairs = set()
         agp_assembler = AGPAssembler(args.path, args.contig_fasta)
         for path in second_pass_results:
-            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            all_segments, used_pairs = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            total_used_pairs.update(used_pairs)
             components.append(all_segments)
 
     else:
         # Process the first pass results without second pass
         components = []
+        total_used_pairs = set()
         agp_assembler = AGPAssembler(args.path, args.contig_fasta)
         for path in first_pass_results:
-            all_segments = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            all_segments, used_pairs = agp_assembler.extract_and_merge(path, dict_edge_info, args.path)
+            total_used_pairs.update(used_pairs)
             components.append(all_segments)
 
     # Assemble components into a single AGP file
     output_agp(components, args.contig_fasta, args.output)
+
+
+    # Output edge info in a edge_log file
+    with open(args.output + ".edge.log", "w") as f:
+        for pair, info in sorted(edge_aggregator.gaussian_info.items(), key=lambda x: int(x[0][0].split("_")[-2])):
+            probability = predict_groundtruth_probability(int(info[0]), int(info[1]), int(info[2]), int(info[3]), int(info[5]), int(info[6]))
+            if pair in total_used_pairs:
+                f.write("\t".join(pair) + "\t")
+                f.write("\t".join([str(x) for x in info]) + "\t")
+                f.write(f"{probability:.3f}\t".replace("nan", "0.000"))
+                f.write("True\n")
+            else:
+                f.write("\t".join(pair) + "\t")
+                f.write("\t".join([str(x) for x in info]) + "\t")
+                f.write(f"{probability:.3f}\t".replace("nan", "0.000"))
+                f.write("False\n")
+
 
     if args.ref_path:
         relevant_samples = set()

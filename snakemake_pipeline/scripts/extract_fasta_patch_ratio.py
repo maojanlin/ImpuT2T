@@ -148,16 +148,32 @@ def count_w_components(entries: List[AgpEntry]) -> int:
     return sum(1 for e in entries if e.component_type == "W")
 
 
-def disassemble_patch(entries: List[AgpEntry]) -> List[List[AgpEntry]]:
+def _should_skip_single_segment_part(
+    part: List[AgpEntry], total_patch_len: int, min_contig_frac: float
+) -> bool:
+    """Skip appending this part if it has exactly one segment and that segment's length ratio < min_contig_frac."""
+    segment_entries = [e for e in part if e.component_type == "W"]
+    if len(segment_entries) != 1:
+        return False
+    segment_len = segment_entries[0].length
+    ratio = (segment_len / total_patch_len) if total_patch_len > 0 else 0.0
+    #print(f"segment_len: {segment_len}, total_patch_len: {total_patch_len}, ratio: {ratio}, {min_contig_frac}, {ratio < min_contig_frac}")
+    return ratio < min_contig_frac
+
+
+def disassemble_patch(entries: List[AgpEntry], min_contig_frac: float) -> List[List[AgpEntry]]:
     idx = find_largest_segment_index(entries)
     if idx is None:
         return []
+    total_patch_len = sum(e.length for e in entries if e.component_type == "W")
+
     left = [e for e in entries[:idx] if e.component_type in ("W", "N")]
     right = [e for e in entries[idx + 1 :] if e.component_type in ("W", "N")]
     parts: List[List[AgpEntry]] = []
-    if count_w_components(left) >= 2:
+    #print("Split!", count_w_components(left), count_w_components(right))
+    if count_w_components(left) >= 2 or not _should_skip_single_segment_part(left, total_patch_len, min_contig_frac):
         parts.append(left)
-    if count_w_components(right) >= 2:
+    if count_w_components(right) >= 2 or not _should_skip_single_segment_part(right, total_patch_len, min_contig_frac):
         parts.append(right)
     return parts
 
@@ -276,7 +292,7 @@ def main() -> None:
             continue
 
         # Disassemble by removing largest segment
-        parts = disassemble_patch(entries)
+        parts = disassemble_patch(entries, args.min_contig_frac)
         for part_idx, part_entries in enumerate(parts):
             p_total, p_seg, p_ratio = compute_segment_ratio(part_entries)
             if p_total <= 0:

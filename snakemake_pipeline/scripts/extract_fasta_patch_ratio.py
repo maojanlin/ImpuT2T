@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum allowed segment ratio in a (sub)patch [default: 0.10]",
     )
     parser.add_argument(
+        "--segment-flank-ratio",
+        type=float,
+        default=1,
+        help="Max allowed ratio of (largest) segment length to shortest flank; exceed triggers disassembly [default: 1]",
+    )
+    parser.add_argument(
         "--min-contig-frac",
         type=float,
         default=0.10,
@@ -142,6 +148,25 @@ def find_largest_segment_index(entries: List[AgpEntry]) -> Optional[int]:
                 max_len = e.length
                 max_idx = i
     return max_idx
+
+
+def segment_flank_ratio_exceeds(entries: List[AgpEntry], threshold: float) -> bool:
+    """
+    True if the largest segment's length / shortest_flank_length > threshold.
+    The largest segment divides the patch into 'before' and 'after' fragments;
+    shortest fragment = min(before_len, after_len). If no segment or shortest
+    flank is 0, returns True (treat as exceeds / trigger disassembly).
+    """
+    idx = find_largest_segment_index(entries)
+    if idx is None:
+        return False
+    segment_len = entries[idx].length
+    before_len = sum(e.length for e in entries[:idx] if e.component_type == "W")
+    after_len = sum(e.length for e in entries[idx + 1 :] if e.component_type == "W")
+    shortest_flank = min(before_len, after_len)
+    if shortest_flank <= 0:
+        return True
+    return (segment_len / shortest_flank) > threshold
 
 
 def count_w_components(entries: List[AgpEntry]) -> int:
@@ -259,6 +284,55 @@ def write_filtered_agp(objects: List[Tuple[str, List[AgpEntry]]], output_path: s
                     )
 
 
+def _process_parts_recursive(
+    parts: List[List[AgpEntry]],
+    obj: str,
+    base_name: str,
+    kept_objects: List[Dict[str, object]],
+    longest_kept_patch_len: int,
+    ratio_threshold: float,
+    segment_flank_ratio: float,
+    min_contig_frac: float,
+) -> int:
+    """Recursively keep or disassemble parts: keep if ratio and segment-flank ratio OK, else split again."""
+    for part_idx, part_entries in enumerate(parts):
+        p_total, _p_seg, p_ratio = compute_segment_ratio(part_entries)
+        if p_total <= 0:
+            continue
+        if p_ratio <= ratio_threshold and not segment_flank_ratio_exceeds(part_entries, segment_flank_ratio):
+            new_name = f"{base_name}_part{part_idx:02d}" if base_name != obj else f"{obj}_part{part_idx:02d}"
+            orig_start = part_entries[0].object_beg
+            orig_end = part_entries[-1].object_end
+            new_entries = reindex_agp_entries(
+                [e for e in part_entries if e.component_type in ("W", "N")], new_name
+            )
+            kept_objects.append({
+                "name": new_name,
+                "entries": new_entries,
+                "source": obj,
+                "orig_start": orig_start,
+                "orig_end": orig_end,
+            })
+            if p_total > longest_kept_patch_len:
+                longest_kept_patch_len = p_total
+        else:
+            sub_parts = disassemble_patch(part_entries, min_contig_frac)
+            if sub_parts:
+                child_base = f"{base_name}_part{part_idx:02d}" if base_name != obj else f"{obj}_part{part_idx:02d}"
+                longest_kept_patch_len = _process_parts_recursive(
+                    sub_parts,
+                    obj,
+                    child_base,
+                    kept_objects,
+                    longest_kept_patch_len,
+                    ratio_threshold,
+                    segment_flank_ratio,
+                    min_contig_frac,
+                )
+            # else: cannot split further, part is discarded
+    return longest_kept_patch_len
+
+
 def main() -> None:
     args = parse_args()
 
@@ -273,7 +347,7 @@ def main() -> None:
         if not obj.startswith("patch"):
             continue
         total_len, seg_len, ratio = compute_segment_ratio(entries)
-        if ratio <= args.ratio_threshold:
+        if ratio <= args.ratio_threshold and not segment_flank_ratio_exceeds(entries, args.segment_flank_ratio):
             # Keep full patch
             new_name = obj
             # Original coordinate span in the full patch
@@ -291,27 +365,18 @@ def main() -> None:
                 longest_kept_patch_len = total_len
             continue
 
-        # Disassemble by removing largest segment
+        # Disassemble by removing largest segment; recurse until ratio OK or cannot split
         parts = disassemble_patch(entries, args.min_contig_frac)
-        for part_idx, part_entries in enumerate(parts):
-            p_total, p_seg, p_ratio = compute_segment_ratio(part_entries)
-            if p_total <= 0:
-                continue
-            if p_ratio <= args.ratio_threshold:
-                new_name = f"{obj}_part{part_idx:02d}"
-                # Original coordinate span for this subpatch in the full patch object
-                orig_start = part_entries[0].object_beg
-                orig_end = part_entries[-1].object_end
-                new_entries = reindex_agp_entries([e for e in part_entries if e.component_type in ("W", "N")], new_name)
-                kept_objects.append({
-                    "name": new_name,
-                    "entries": new_entries,
-                    "source": obj,
-                    "orig_start": orig_start,
-                    "orig_end": orig_end,
-                })
-                if p_total > longest_kept_patch_len:
-                    longest_kept_patch_len = p_total
+        longest_kept_patch_len = _process_parts_recursive(
+            parts,
+            obj,
+            obj,
+            kept_objects,
+            longest_kept_patch_len,
+            args.ratio_threshold,
+            args.segment_flank_ratio,
+            args.min_contig_frac,
+        )
 
     # Process individual contig objects
     min_contig_len = int(longest_kept_patch_len * args.min_contig_frac)

@@ -1165,7 +1165,7 @@ def predict_groundtruth_probability(STD, dist, chosen_score, highest_score, num_
         print(f"Probability: {prob:.3f}")
     """
     # Create feature array in the correct order: [STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM]
-    features = np.array([[STD, dist, chosen_score, highest_score, num_haplotypes, num_GMM]])
+    features = np.array([[STD, abs(dist), chosen_score, highest_score, num_haplotypes, num_GMM]])
     
     # Handle -1 values (replace with NaN)
     features = np.where(features == -1, np.nan, features)

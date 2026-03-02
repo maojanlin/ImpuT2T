@@ -3,13 +3,18 @@ from pathlib import Path
 
 def parse_fasta_file(fasta_file):
     dict_fasta = {}
+    contig_id = None
+    contig_sequence = ''
     with open(fasta_file, 'r') as f:
         for line in f:
             if line.startswith('>'):
+                if contig_id is not None:
+                    dict_fasta[contig_id] = contig_sequence
                 contig_id = line.strip().split('>')[1]
-                dict_fasta[contig_id] = ''
+                contig_sequence = ''
             else:
-                dict_fasta[contig_id] += line.strip()
+                contig_sequence += line.strip()
+        dict_fasta[contig_id] = contig_sequence
     return dict_fasta
 
 def write_contigs_to_fasta(contigs_df, output_path, dict_fasta):
@@ -19,12 +24,14 @@ def write_contigs_to_fasta(contigs_df, output_path, dict_fasta):
             f.write(f">{contig_id}\n")
             f.write(f"{dict_fasta[contig_id]}\n")
     """
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
     for chromosome, contigs in contigs_df.items():
-        f = open(f"{output_path}.{chromosome}.assigned.fa", 'w')
-        for idx, contig_id in enumerate(contigs):
-            f.write(f">{contig_id}_{chromosome}_impuT2T_{str(idx)}\n")
-            f.write(f"{dict_fasta[contig_id]}\n")
-        f.close()
+        out_file = output_path / f"{chromosome}.assigned.fa"
+        with open(out_file, 'w') as f:
+            for idx, contig_id in enumerate(contigs):
+                f.write(f">{contig_id}_{chromosome}_impuT2T_{str(idx)}\n")
+                f.write(f"{dict_fasta[contig_id]}\n")
 
 def parse_contig_csv(contigs_csv):
     dict_chromosomes = {}
@@ -45,10 +52,8 @@ def main():
 
     dict_fasta = parse_fasta_file(args.contigs_file)
     dict_chromosomes = parse_contig_csv(args.contigs_csv)
-    output_path = Path(args.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    write_contigs_to_fasta(dict_chromosomes, output_path, dict_fasta)
+    write_contigs_to_fasta(dict_chromosomes, args.output_path, dict_fasta)
 
 
 if __name__ == "__main__":

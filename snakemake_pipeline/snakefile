@@ -1,25 +1,26 @@
 # Snakefile
 
 # Configuration
-configfile: "config.yaml"
+configfile: "config.HG002-hprc1.yaml"
 
 # Global variables
 SMALL_PAN = config["small_pan"]
 QUERIES = config["queries"]
+QUERY_NAMES = [item[0] for item in QUERIES]
+SMALL_PAN_NAMES = [item[0] for item in SMALL_PAN]
 THREADS = config["threads"]  # Total cores available
 RAGTAG_THREADS = config["ragtag_threads"]  # Threads per ragtag job
 SAMPLE = config["sample"]
 SMALL_PAN_PREFIXES = config["small_pan_prefixes"]
+# Per-query target chromosomes: list of lists, one list per query (same order as QUERIES)
 TARGET_CHROMOSOMES = config["target_chromosomes"]
+QUERY_TO_CHROMOSOMES = {QUERY_NAMES[i]: TARGET_CHROMOSOMES[i] for i in range(len(QUERY_NAMES))}
+QUERY_CHROMOSOME_PAIRS = [(q, c) for q in QUERY_NAMES for c in QUERY_TO_CHROMOSOMES[q]]
 
 # Create dictionaries for easy lookup: {name: path}
 SMALL_PAN_PREFIXES_DICT = {item[0]: item[1] for item in SMALL_PAN_PREFIXES}
 SMALL_PAN_DICT = {item[0]: item[1] for item in SMALL_PAN}
 QUERIES_DICT = {item[0]: item[1] for item in QUERIES}
-
-# Generate all combinations of query and small_pan names
-QUERY_NAMES = [item[0] for item in QUERIES]
-SMALL_PAN_NAMES = [item[0] for item in SMALL_PAN]
 
 PANGENOME_NAMES = config["pangenome_names"]
 PANGENOME_PATH = config["pangenome_path"]
@@ -50,38 +51,17 @@ rule all:
             query_name=QUERY_NAMES,
             pan_name=SMALL_PAN_NAMES
         ),
-        expand(
-            "contigs_assignment/{sample}_{query_name}_assigned.{chromosome}.assigned.fa",
-            sample=[SAMPLE],
-            query_name=QUERY_NAMES,
-            chromosome=TARGET_CHROMOSOMES
-        ),
-        expand(
-            "pangenome_alignment_{sample}_{query_name}/{chromosome}/{sample}_{query_name}_to_{pangenome_name}_{chromosome}.paf",
-            sample=[SAMPLE],
-            query_name=QUERY_NAMES,
-            chromosome=TARGET_CHROMOSOMES,
-            pangenome_name=PANGENOME_NAMES
-        ),
-        expand(
-            "local_alignment_{sample}_{query_name}/{chromosome}/{sample}.{query_name}.{pangenome_name}.agp",
-            sample=[SAMPLE],
-            query_name=QUERY_NAMES,
-            chromosome=TARGET_CHROMOSOMES,
-            pangenome_name=PANGENOME_NAMES
-        ),
-        expand(
-            "impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate.patch.fasta",
-            sample=[SAMPLE],
-            query_name=QUERY_NAMES,
-            chromosome=TARGET_CHROMOSOMES
-        ),
-        expand(
-            "impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate.patch.filtered.fasta",
-            sample=[SAMPLE],
-            query_name=QUERY_NAMES,
-            chromosome=TARGET_CHROMOSOMES
-        ),
+        [f"contigs_assignment/{SAMPLE}_{q}_assigned" for q in QUERY_NAMES],
+        [
+            f"pangenome_alignment_{SAMPLE}_{q}/{c}/{SAMPLE}_{q}_to_{p}_{c}.paf"
+            for q, c in QUERY_CHROMOSOME_PAIRS for p in PANGENOME_NAMES
+        ],
+        [
+            f"local_alignment_{SAMPLE}_{q}/{c}/{SAMPLE}.{q}.{p}.agp"
+            for q, c in QUERY_CHROMOSOME_PAIRS for p in PANGENOME_NAMES
+        ],
+        [f"impuT2T_patch/{SAMPLE}.{q}.{c}.aggregate.patch.fasta" for q, c in QUERY_CHROMOSOME_PAIRS],
+        [f"impuT2T_patch/{SAMPLE}.{q}.{c}.aggregate.patch.filtered.fasta" for q, c in QUERY_CHROMOSOME_PAIRS],
         expand(
             "final_genome/{sample}.aggregate.patch.filtered.fasta",
             sample=[SAMPLE]
@@ -92,7 +72,8 @@ rule run_ragtag:
         query = lambda wildcards: QUERIES_DICT[wildcards.query_name],
         small_pan = lambda wildcards: SMALL_PAN_DICT[wildcards.pan_name]
     output:
-        ragtag_output = "ragtag_output/{sample}_{query_name}_{pan_name}/ragtag.scaffold.asm.paf"
+        ragtag_paf = "ragtag_output/{sample}_{query_name}_{pan_name}/ragtag.scaffold.asm.paf",
+        ragtag_agp = "ragtag_output/{sample}_{query_name}_{pan_name}/ragtag.scaffold.agp"
     benchmark:
         "benchmarks/{sample}_{query_name}_{pan_name}.run_ragtag.txt"
     log:
@@ -152,6 +133,14 @@ rule consensus_scaffold:
         config_file = "consensus_scaffold/{sample}_{query_name}_config.json"
     output:
         consensus = "consensus_scaffold/{sample}_{query_name}_consensus.csv"
+    params:
+        # Add --X, --Y, --M based on target_chromosomes for this query
+        extra_flags = lambda wildcards: " ".join(
+            []
+            + (["--X"] if "chrX" in QUERY_TO_CHROMOSOMES[wildcards.query_name] else [])
+            + (["--Y"] if "chrY" in QUERY_TO_CHROMOSOMES[wildcards.query_name] else [])
+            + (["--M"] if "chrM" in QUERY_TO_CHROMOSOMES[wildcards.query_name] else [])
+        )
     benchmark:
         "benchmarks/{sample}_{query_name}_consensus_scaffold.txt"
     log:
@@ -161,7 +150,7 @@ rule consensus_scaffold:
     threads: THREADS
     shell:
         """
-        python3 scripts/consensus_scaffold.py --config {input.config_file} -o {output.consensus} --autosome-only
+        python3 scripts/consensus_scaffold.py --config {input.config_file} -o {output.consensus} {params.extra_flags}
         """
 
 rule assign_contigs_to_chromosomes:
@@ -169,10 +158,7 @@ rule assign_contigs_to_chromosomes:
         consensus = "consensus_scaffold/{sample}_{query_name}_consensus.csv",
         fasta = lambda wildcards: QUERIES_DICT[wildcards.query_name]
     output:
-        assigned = expand(
-            "contigs_assignment/{{sample}}_{{query_name}}_assigned.{chromosome}.assigned.fa",
-            chromosome=TARGET_CHROMOSOMES
-        )
+        assigned_dir = directory("contigs_assignment/{sample}_{query_name}_assigned")
     params:
         output_prefix = "contigs_assignment/{sample}_{query_name}_assigned"
     benchmark:
@@ -191,7 +177,7 @@ rule assign_contigs_to_chromosomes:
 rule alignment_pangenome:
     input:
         pangenome = lambda wildcards: f"{PANGENOME_PATH}/{wildcards.chromosome}/{wildcards.pangenome_name}.fasta",
-        assigned = "contigs_assignment/{sample}_{query_name}_assigned.{chromosome}.assigned.fa"
+        assigned_dir = "contigs_assignment/{sample}_{query_name}_assigned"
     output:
         alignment = "pangenome_alignment_{sample}_{query_name}/{chromosome}/{sample}_{query_name}_to_{pangenome_name}_{chromosome}.paf"
     benchmark:
@@ -202,15 +188,12 @@ rule alignment_pangenome:
     shell:
         """
         mkdir -p pangenome_alignment_{wildcards.sample}_{wildcards.query_name}/{wildcards.chromosome}/
-        minimap2 -x asm5 -t {threads} {input.pangenome} {input.assigned} -o {output.alignment}
-        #minimap2 -x asm5 -t {threads} {input.pangenome} \
-        #    "contigs_assignment/{wildcards.sample}_{wildcards.query_name}_assigned.{wildcards.chromosome}.assigned.fa" \
-        #    -o "pangenome_alignment_{wildcards.sample}_{wildcards.query_name}/{wildcards.chromosome}/{wildcards.sample}_{wildcards.query_name}_to_{wildcards.pangenome_name}_{wildcards.chromosome}.paf"
+        minimap2 -x asm5 -t {threads} {input.pangenome} {input.assigned_dir}/{wildcards.chromosome}.assigned.fa -o {output.alignment}
         """
 
 rule impuT2T_local:
     input:
-        assigned = "contigs_assignment/{sample}_{query_name}_assigned.{chromosome}.assigned.fa",
+        assigned_dir = "contigs_assignment/{sample}_{query_name}_assigned",
         alignment = "pangenome_alignment_{sample}_{query_name}/{chromosome}/{sample}_{query_name}_to_{pangenome_name}_{chromosome}.paf",
         pangenome = lambda wildcards: f"{PANGENOME_PATH.rstrip('/')}/{wildcards.chromosome}/{wildcards.pangenome_name}.fasta"
     output:
@@ -227,7 +210,7 @@ rule impuT2T_local:
         mkdir -p local_alignment_{wildcards.sample}_{wildcards.query_name}/{wildcards.chromosome}/
         python3 scripts/from_paf_to_multi_connections.py \
             -fl {input.alignment} \
-            -q {input.assigned} \
+            -q {input.assigned_dir}/{wildcards.chromosome}.assigned.fa \
             -o {params.output_prefix} \
             -r {input.pangenome} \
             --info_only
@@ -235,7 +218,7 @@ rule impuT2T_local:
 
 rule impuT2T_patch:
     input:
-        assigned = lambda wildcards: f"contigs_assignment/{wildcards.sample}_{wildcards.query_name}_assigned.{wildcards.chromosome}.assigned.fa",
+        assigned_dir = "contigs_assignment/{sample}_{query_name}_assigned",
         local_patched = lambda wildcards: expand(
             "local_alignment_{sample}_{query_name}/{chromosome}/{sample}.{query_name}.{pangenome_name}.agp",
             sample=[wildcards.sample],
@@ -250,7 +233,12 @@ rule impuT2T_patch:
         releveant_seq = temp("impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate.relevant_seq.fasta"),
         releveant_seq_fai = temp("impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate.relevant_seq.fasta.fai")
     params:
-        output_prefix = "impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate"
+        output_prefix = "impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate",
+        extra_flags = lambda wildcards: " ".join(
+            []
+            + (["--sample_num 350"] if "chrX" == wildcards.chromosome else [])
+            + (["--sample_num 119"] if "chrY" == wildcards.chromosome else [])
+        )
     benchmark:
         "benchmarks/{sample}_{query_name}_{chromosome}_patch.txt"
     log:
@@ -259,12 +247,13 @@ rule impuT2T_patch:
     shell:
         """
         mkdir -p impuT2T_patch
-        python3 scripts/aggregate_paths_info_simple.py \
+        python3 scripts/aggregate_paths_info_semi-greedy.py \
             -p local_alignment_{wildcards.sample}_{wildcards.query_name}/{wildcards.chromosome}/{wildcards.sample}.{wildcards.query_name}. \
-            -l sample_id.log \
+            -l sample_id.HG002.log \
             -o {params.output_prefix} \
-            --contig_fasta {input.assigned} \
+            --contig_fasta {input.assigned_dir}/{wildcards.chromosome}.assigned.fa \
             --ref_path {PANGENOME_PATH}/{wildcards.chromosome}/ \
+            {params.extra_flags} \
             --second_pass --gmm --weight_ratio 0.5 >> {log} 2>&1
 
         python3 scripts/extract_fasta_patch_ratio.py \
@@ -275,24 +264,20 @@ rule impuT2T_patch:
 
 rule aggregate_final_genome:
     input:
-        filtered_fasta = lambda wildcards: expand(
-            "impuT2T_patch/{sample}.{query_name}.{chromosome}.aggregate.patch.filtered.fasta",
-            sample=[wildcards.sample],
-            query_name=QUERY_NAMES,
-            chromosome=TARGET_CHROMOSOMES
-        )
+        filtered_fasta = lambda wildcards: [
+            f"impuT2T_patch/{SAMPLE}.{q}.{c}.aggregate.patch.filtered.fasta"
+            for q, c in QUERY_CHROMOSOME_PAIRS
+        ]
     output:
         final_genome = "final_genome/{sample}.aggregate.patch.filtered.fasta"
     params:
         paths = lambda wildcards: " ".join([
-            f"impuT2T_patch/{SAMPLE}.{query_name}.{chromosome}.aggregate.patch.filtered.fasta"
-            for query_name in QUERY_NAMES
-            for chromosome in TARGET_CHROMOSOMES
+            f"impuT2T_patch/{SAMPLE}.{q}.{c}.aggregate.patch.filtered.fasta"
+            for q, c in QUERY_CHROMOSOME_PAIRS
         ]),
         names = lambda wildcards: " ".join([
-            f"{query_name}_{chromosome}"
-            for query_name in QUERY_NAMES
-            for chromosome in TARGET_CHROMOSOMES
+            f"{q}_{c}"
+            for q, c in QUERY_CHROMOSOME_PAIRS
         ])
     benchmark:
         "benchmarks/{sample}_aggregate_final_genome.txt"

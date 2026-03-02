@@ -61,7 +61,7 @@ def parse_agp_file(agp_file, target_prefix):
     
     return contig_dict, contig_order_dict
 
-def create_consensus_contigs(all_lists, file_names, fai_file, min_occurrences=2, len_threshold=100000, dump_file='aggregated_contigs.csv', flag_autosome=False):
+def create_consensus_contigs(all_lists, file_names, fai_file, list_chrom, min_occurrences=2, len_threshold=100000, dump_file='aggregated_contigs.csv'):
     """
     Create ordered consensus contigs with weighted scoring based on position information.
     
@@ -94,7 +94,7 @@ def create_consensus_contigs(all_lists, file_names, fai_file, min_occurrences=2,
     dict_contigs_voting = defaultdict(dict)
     
     for chrom in sorted(all_chromosomes):
-        if flag_autosome and chrom not in ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22"]:
+        if chrom not in list_chrom:
             continue
         print(f"\nProcessing chromosome: {chrom}")
         
@@ -205,6 +205,9 @@ def main():
     parser.add_argument('--min-occurrences', type=int, default=2, help='Minimum occurrences for consensus')
     parser.add_argument('--len-threshold', type=int, default=100000, help='Length threshold for consensus')
     parser.add_argument('--autosome-only', action='store_true', help='Only use autosomes for consensus')
+    parser.add_argument('--X', action='store_true', help='Include chrX for consensus')
+    parser.add_argument('--Y', action='store_true', help='Include chrY for consensus')
+    parser.add_argument('--M', action='store_true', help='Include chrM for consensus')
     
     args = parser.parse_args()
     flag_autosome = args.autosome_only
@@ -247,14 +250,21 @@ def main():
         all_dicts[name], all_lists[name] = parse_agp_file(agp_file, prefix)
     
     # Create consensus contigs
+    list_chrom = ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22"]
+    if args.X:
+        list_chrom.append("chrX")
+    if args.Y:
+        list_chrom.append("chrY")
+    if args.M:
+        list_chrom.append("chrM")
     create_consensus_contigs(
         all_lists, 
         file_names, 
         fai_file, 
+        list_chrom=list_chrom,
         min_occurrences=args.min_occurrences, 
         len_threshold=args.len_threshold,
         dump_file=args.output,
-        flag_autosome=flag_autosome
     )
     
     print("\nDone!")

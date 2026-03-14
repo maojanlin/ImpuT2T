@@ -662,6 +662,9 @@ class PathFinderGreedy:
                     new_component = component_1 + [head_node, tail_node] + component_2
                 elif direction_1 == '1' and direction_2 == '3':
                     new_component = component_1 + [head_node, tail_node] + component_2[::-1]
+                # sort the component by the node position
+                if new_component[-1].split("_")[-2] < new_component[0].split("_")[-2]:
+                    new_component = new_component[::-1]
                 self.connected_components.append(new_component)
                 self.connected_components.remove(component_1)
                 self.connected_components.remove(component_2)

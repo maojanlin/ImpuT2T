@@ -2,8 +2,8 @@
 
 rule alignment_pangenome:
     input:
-        pangenome=lambda wildcards: (
-            f"{PANGENOME_PATH}/{wildcards.chromosome}/{wildcards.pangenome_name}.fasta"
+        pangenome=lambda wildcards: pangenome_fasta_path(
+            wildcards.chromosome, wildcards.pangenome_name
         ),
         assigned_dir=f"{OUT}/contigs_assignment/{{sample}}_{{query_name}}_assigned",
     output:
@@ -25,8 +25,8 @@ rule impuT2T_local:
     input:
         assigned_dir=f"{OUT}/contigs_assignment/{{sample}}_{{query_name}}_assigned",
         alignment=f"{OUT}/pangenome_alignment_{{sample}}_{{query_name}}/{{chromosome}}/{{sample}}_{{query_name}}_to_{{pangenome_name}}_{{chromosome}}.paf",
-        pangenome=lambda wildcards: (
-            f"{PANGENOME_PATH.rstrip('/')}/{wildcards.chromosome}/{wildcards.pangenome_name}.fasta"
+        pangenome=lambda wildcards: pangenome_fasta_path(
+            wildcards.chromosome, wildcards.pangenome_name
         ),
     output:
         local_patched=f"{OUT}/local_alignment_{{sample}}_{{query_name}}/{{chromosome}}/{{sample}}.{{query_name}}.{{pangenome_name}}.agp",
@@ -61,7 +61,7 @@ rule tiebreak_manifest:
     output:
         f"{OUT}/local_alignment_{{sample}}_{{query_name}}/{{chromosome}}/tiebreak_manifest.tsv",
     params:
-        pg_path=lambda wildcards: PANGENOME_PATH.rstrip("/"),
+        pg_path=lambda wildcards: PANGENOME_PATH,
         out=OUT,
     benchmark:
         f"{OUT}/benchmarks/{{sample}}_{{query_name}}_{{chromosome}}_tiebreak_manifest.txt"
@@ -77,8 +77,10 @@ rule tiebreak_manifest:
             donor="$(echo "$line" | sed 's/\\r$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [ -z "$donor" ] && continue
             case "$donor" in '#'*) continue ;; esac
-            printf '%s\\t{params.out}/pangenome_alignment_{wildcards.sample}_{wildcards.query_name}/{wildcards.chromosome}/{wildcards.sample}_{wildcards.query_name}_to_%s_{wildcards.chromosome}.paf\\t{params.out}/contigs_assignment/{wildcards.sample}_{wildcards.query_name}_assigned/{wildcards.chromosome}.assigned.fa\\t{params.pg_path}/{wildcards.chromosome}/%s.fasta\\n' \
-                "$donor" "$donor" "$donor" >> "{output}"
+            ref_fa="{params.pg_path}/{wildcards.chromosome}/$donor.fasta"
+            [ -f "$ref_fa" ] || continue
+            printf '%s\\t{params.out}/pangenome_alignment_{wildcards.sample}_{wildcards.query_name}/{wildcards.chromosome}/{wildcards.sample}_{wildcards.query_name}_to_%s_{wildcards.chromosome}.paf\\t{params.out}/contigs_assignment/{wildcards.sample}_{wildcards.query_name}_assigned/{wildcards.chromosome}.assigned.fa\\t%s\\n' \
+                "$donor" "$donor" "$ref_fa" >> "{output}"
         done < "{input.sample_list}"
         """
 
@@ -91,15 +93,13 @@ rule impuT2T_patch:
             sample=[wildcards.sample],
             query_name=[wildcards.query_name],
             chromosome=[wildcards.chromosome],
-            pangenome_name=PANGENOME_NAMES,
+            pangenome_name=pangenome_names_for(wildcards.chromosome),
         ),
         tiebreak_manifest=f"{OUT}/local_alignment_{{sample}}_{{query_name}}/{{chromosome}}/tiebreak_manifest.tsv",
     output:
         patch_fasta=f"{OUT}/impuT2T_patch/{{run_tag}}/{{sample}}.{{query_name}}.{{chromosome}}.aggregate.patch.fasta",
         patch_agp=f"{OUT}/impuT2T_patch/{{run_tag}}/{{sample}}.{{query_name}}.{{chromosome}}.aggregate.agp",
-        filtered_fasta=temp(
-            f"{OUT}/impuT2T_patch/{{run_tag}}/{{sample}}.{{query_name}}.{{chromosome}}.aggregate.patch.filtered.fasta"
-        ),
+        filtered_fasta=f"{OUT}/impuT2T_patch/{{run_tag}}/{{sample}}.{{query_name}}.{{chromosome}}.aggregate.patch.filtered.fasta",
         releveant_seq=temp(
             f"{OUT}/impuT2T_patch/{{run_tag}}/{{sample}}.{{query_name}}.{{chromosome}}.aggregate.relevant_seq.fasta"
         ),
@@ -134,7 +134,7 @@ rule impuT2T_patch:
             -l {SAMPLE_LIST_FILE} \
             -o {params.output_prefix} \
             --contig_fasta {input.assigned_dir}/{wildcards.chromosome}.assigned.fa \
-            --ref_path {PANGENOME_PATH}/{wildcards.chromosome}/ \
+            --ref_path {PANGENOME_PATH}/{wildcards.chromosome} \
             {params.extra_flags} \
             --tiebreak \
             --tiebreak_manifest {input.tiebreak_manifest} \

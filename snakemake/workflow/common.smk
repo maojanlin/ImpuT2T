@@ -1,8 +1,17 @@
 # Shared configuration and path helpers (included by master and chromosome workflows).
 
+import os
 import sys
 
 OUT = config["output_dir"]
+
+# Paths in included .smk files resolve relative to workflow/, not the repo root.
+WORKFLOW_ROOT = workflow.basedir
+if os.path.basename(WORKFLOW_ROOT.rstrip("/")) == "workflow":
+    WORKFLOW_ROOT = os.path.dirname(WORKFLOW_ROOT.rstrip("/"))
+SCRIPTS = os.path.join(WORKFLOW_ROOT, "scripts")
+RAGTAG_CONDA_ENV = os.path.join(WORKFLOW_ROOT, "envs", "ragtag.yaml")
+CHROMOSOME_SMK = os.path.join(WORKFLOW_ROOT, "workflow", "chromosome.smk")
 
 SMALL_PAN = config["small_pan"]
 QUERIES = config["queries"]
@@ -20,7 +29,8 @@ SMALL_PAN_DICT = {item[0]: item[1] for item in SMALL_PAN}
 QUERIES_DICT = {item[0]: item[1] for item in QUERIES}
 
 PANGENOME_NAMES = config["pangenome_names"]
-PANGENOME_PATH = config["pangenome_path"]
+ALL_PANGENOME_NAMES = PANGENOME_NAMES
+PANGENOME_PATH = config["pangenome_path"].rstrip("/")
 
 FLAT_THRESHOLD = config.get("heavy_jobs_flat_threshold", 6000)
 
@@ -31,14 +41,41 @@ CHILD_MODE = (
     and config.get("chromosome") is not None
 )
 
+
+def pangenome_fasta_path(chromosome, name):
+    return os.path.join(PANGENOME_PATH, chromosome, f"{name}.fasta")
+
+
+def pangenome_names_for(chromosome):
+    """Donors that have a per-chromosome split FASTA (chrX/chrY/chrM are often partial)."""
+    return [
+        name
+        for name in ALL_PANGENOME_NAMES
+        if os.path.isfile(pangenome_fasta_path(chromosome, name))
+    ]
+
+
 if CHILD_MODE:
     RUN_TAG = config["run_tag"]
     SAMPLE_LIST_FILE = config["sample_list_file"]
     QUERY_CHROMOSOME_PAIRS = [(config["query_name"], config["chromosome"])]
+    PANGENOME_NAMES = pangenome_names_for(config["chromosome"])
+    skipped = len(ALL_PANGENOME_NAMES) - len(PANGENOME_NAMES)
+    if skipped:
+        print(
+            f"[impuT2T] {config['chromosome']}: "
+            f"{len(PANGENOME_NAMES)}/{len(ALL_PANGENOME_NAMES)} pangenome donors "
+            f"(skipped {skipped} without split FASTA)",
+            file=sys.stderr,
+        )
 else:
     QUERY_CHROMOSOME_PAIRS = [
         (q, c) for q in QUERY_NAMES for c in QUERY_TO_CHROMOSOMES[q]
     ]
+    PANGENOME_NAMES_BY_CHROMOSOME = {
+        chromosome: pangenome_names_for(chromosome)
+        for chromosome in {c for _, c in QUERY_CHROMOSOME_PAIRS}
+    }
 
 
 def patch_filtered_fasta(sample, query_name, chromosome, run_tag):

@@ -12,7 +12,7 @@ rule run_ragtag:
     log:
         f"{OUT}/logs/{{sample}}_{{query_name}}_{{pan_name}}.run_ragtag.txt"
     conda:
-        "envs/ragtag.yaml"
+        RAGTAG_CONDA_ENV
     threads:
         RAGTAG_THREADS
     shell:
@@ -63,7 +63,7 @@ rule generate_consensus_config:
             SMALL_PAN_PREFIXES_DICT[p] for p in SMALL_PAN_NAMES
         ],
     script:
-        "scripts/generate_consensus_config.py"
+        os.path.join(SCRIPTS, "generate_consensus_config.py")
 
 
 rule consensus_scaffold:

@@ -1805,10 +1805,13 @@ class AGPAssembler:
     
 class SequenceCollector:
     def __init__(self, ref_path):
-        self.ref_path = ref_path
-    
+        self.ref_path = ref_path.rstrip("/")
+
     def collect(self, relevant_ref_ids, contig_fasta_path, output_path):
-        list_files = [self.ref_path + id + ".fasta" for id in relevant_ref_ids]
+        list_files = [
+            os.path.join(self.ref_path, f"{ref_id}.fasta")
+            for ref_id in relevant_ref_ids
+        ]
         with open(output_path + ".relevant_seq.fasta", "w") as out_f:
             for fasta in [contig_fasta_path] + list_files:
                 with open(fasta, "r") as in_f:

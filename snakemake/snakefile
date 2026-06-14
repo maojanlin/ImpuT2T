@@ -1,0 +1,56 @@
+# impuT2T Snakemake workflow (master entry point)
+#
+# Usage:
+#   snakemake -j 48 --configfile config.CN1.yaml
+#
+# Workflow mode (auto):
+#   flat   — single process when 2 * n_donors * n_chr_pairs < heavy_jobs_flat_threshold (default 6000)
+#   nested — per-chromosome child Snakemake runs for larger pangenomes
+
+configfile: "config.CN1.yaml"
+# Keep in sync with configfile above, or pass --configfile on the CLI (see ACTIVE_CONFIGFILE below).
+RUN_TAG = "POP-470-0517"
+SAMPLE_LIST_FILE = "subsample_lists/sample_id.CN1.log"
+
+include: "workflow/common.smk"
+
+# Use the configfile from the CLI when provided (Snakemake 7+).
+try:
+    ACTIVE_CONFIGFILE = workflow.configfiles[0]
+except (NameError, IndexError, AttributeError):
+    ACTIVE_CONFIGFILE = "config.CN1.yaml"
+include: "workflow/prepare.smk"
+include: "workflow/final.smk"
+
+if WORKFLOW_MODE == "flat":
+    include: "workflow/pangenome.smk"
+
+    rule all:
+        input:
+            expand(
+                f"{OUT}/ragtag_output/{{sample}}_{{query_name}}_{{pan_name}}/ragtag.scaffold.asm.paf",
+                sample=[SAMPLE],
+                query_name=QUERY_NAMES,
+                pan_name=SMALL_PAN_NAMES,
+            ),
+            [f"{OUT}/contigs_assignment/{SAMPLE}_{q}_assigned" for q in QUERY_NAMES],
+            patch_outputs(),
+            final_genome_fasta(),
+
+else:
+    include: "workflow/nested.smk"
+
+    rule all:
+        input:
+            expand(
+                f"{OUT}/ragtag_output/{{sample}}_{{query_name}}_{{pan_name}}/ragtag.scaffold.asm.paf",
+                sample=[SAMPLE],
+                query_name=QUERY_NAMES,
+                pan_name=SMALL_PAN_NAMES,
+            ),
+            [f"{OUT}/contigs_assignment/{SAMPLE}_{q}_assigned" for q in QUERY_NAMES],
+            [
+                f"{OUT}/checkpoints/{SAMPLE}_{q}_{c}.done"
+                for q, c in QUERY_CHROMOSOME_PAIRS
+            ],
+            final_genome_fasta(),

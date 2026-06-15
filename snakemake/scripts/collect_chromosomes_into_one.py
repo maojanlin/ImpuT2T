@@ -26,7 +26,7 @@ def main():
     names = args.names
     output_path = args.output
 
-    # Aggregate FASTA sequences, renaming headers with chromosome/haplotype prefix
+    # Aggregate FASTA sequences: prefix patch object names (column 1 in AGP).
     with open(output_path, "w") as f_o:
         for input_path, name in zip(input_paths, names):
             with open(input_path, "r") as f_i:
@@ -37,7 +37,7 @@ def main():
                     else:
                         f_o.write(line.strip() + "\n")
 
-    # Optionally aggregate AGP files, keeping AGP/FASTA naming consistent
+    # Aggregate AGP: prefix object IDs (column 1) only; keep component IDs (column 6) as-is.
     if args.agp_input and args.agp_output:
         agp_input_paths = args.agp_input
         agp_output_path = args.agp_output
@@ -47,22 +47,14 @@ def main():
                 with open(agp_path, "r") as f_agp_i:
                     for line in f_agp_i:
                         if line.startswith("#") or not line.strip():
-                            # Comments or empty lines are skipped
                             continue
 
                         cols = line.rstrip("\n").split("\t")
                         if len(cols) < 6:
-                            # Malformed AGP line, write unchanged
                             f_agp_o.write(line)
                             continue
 
-                        # Prefix the object (column 1) with the chromosome/haplotype name
                         cols[0] = f"{name}_{cols[0]}"
-
-                        # For W lines, column 6 is the component ID which should match FASTA headers
-                        if cols[4] == "W":
-                            cols[5] = f"{name}_{cols[5]}"
-
                         f_agp_o.write("\t".join(cols) + "\n")
 
 

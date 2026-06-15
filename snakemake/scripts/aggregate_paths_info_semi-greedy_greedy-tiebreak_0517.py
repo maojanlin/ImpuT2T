@@ -25,6 +25,7 @@ import time
 DEFAULT_TIMEOUT = 300
 RETRY_TIMEOUT = 300
 CONNECTION_SCORE_MULTIPLIER = 10
+PATCH_ID_WIDTH = 3  # patch object names: patch001, patch002, ...
 
 # Edges with distance above this and probability below threshold are excluded from
 # graph building / path finding but still written to .edge.log from gaussian_info.
@@ -1862,7 +1863,7 @@ def output_agp(components, contig_fasta_path, output_path):
         f.write(comment_line + '\n')
         for item_type, item_id, component, first_contig in output_items:
             if item_type == 'patch':
-                object = 'patch' + "{0:08}".format(item_id)
+                object = f"patch{item_id:0{PATCH_ID_WIDTH}d}"
                 print(f"idx: {item_id}, Object: {object}, component length: {len(component)}")
                 for segment in component:
                     f.write(f"{object}\t{segment['object_beg']}\t{segment['object_end']}\t"

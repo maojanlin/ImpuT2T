@@ -1,6 +1,7 @@
 # Pangenome alignment, local patching, and per-chromosome aggregate patch.
 
 rule alignment_pangenome:
+    retries: 2
     input:
         pangenome=lambda wildcards: pangenome_fasta_path(
             wildcards.chromosome, wildcards.pangenome_name
@@ -22,6 +23,7 @@ rule alignment_pangenome:
 
 
 rule impuT2T_local:
+    retries: 2
     input:
         assigned_dir=f"{OUT}/contigs_assignment/{{sample}}_{{query_name}}_assigned",
         alignment=f"{OUT}/pangenome_alignment_{{sample}}_{{query_name}}/{{chromosome}}/{{sample}}_{{query_name}}_to_{{pangenome_name}}_{{chromosome}}.paf",

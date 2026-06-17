@@ -59,7 +59,7 @@ rule tiebreak_manifest:
     """
     input:
         sample_list=SAMPLE_LIST_FILE,
-        assigned_fa=f"{OUT}/contigs_assignment/{{sample}}_{{query_name}}_assigned/{{chromosome}}.assigned.fa",
+        assigned_dir=f"{OUT}/contigs_assignment/{{sample}}_{{query_name}}_assigned",
     output:
         f"{OUT}/local_alignment_{{sample}}_{{query_name}}/{{chromosome}}/tiebreak_manifest.tsv",
     params:

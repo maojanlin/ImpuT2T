@@ -1,16 +1,17 @@
 # impuT2T Snakemake workflow (master entry point)
 #
 # Usage:
-#   snakemake -j 48 --configfile config.CN1.yaml
+#   snakemake -j 48 --configfile config.yaml
 #
 # Workflow mode (auto):
 #   flat   — single process when 2 * n_donors * n_chr_pairs < heavy_jobs_flat_threshold (default 6000)
 #   nested — per-chromosome child Snakemake runs for larger pangenomes
 
-configfile: "config.CN1.yaml"
+configfile: "config.yaml"
 # Keep in sync with configfile above, or pass --configfile on the CLI (see ACTIVE_CONFIGFILE below).
-RUN_TAG = "POP-470-0517"
-SAMPLE_LIST_FILE = "subsample_lists/sample_id.CN1.log"
+RUN_TAG = "run0"
+SAMPLE_LIST_FILE = "subsample_lists/sample_id.log"
+#SAMPLE_LIST_FILE = "subsample_lists/sample_id.POP-10.log"
 
 include: "workflow/common.smk"
 
@@ -18,7 +19,7 @@ include: "workflow/common.smk"
 try:
     ACTIVE_CONFIGFILE = workflow.configfiles[0]
 except (NameError, IndexError, AttributeError):
-    ACTIVE_CONFIGFILE = "config.CN1.yaml"
+    ACTIVE_CONFIGFILE = "config.yaml"
 include: "workflow/prepare.smk"
 include: "workflow/final.smk"
 

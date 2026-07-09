@@ -158,7 +158,7 @@ for chr in $(seq 1 22 | sed 's/^/chr/') chrX chrY chrM; do
 done
 ```
 
-<!-->
+<!--
 Or with AWS CLI:
 
 ```bash
@@ -180,7 +180,7 @@ database/extract_chr_pangenome.sh
 database/extract_chr_pangenome.sh snakemake/subsample_lists/sample_id.POP-10.log
 ```
 
-<!-->
+<!--
 Manual single-donor example:
 
 ```bash

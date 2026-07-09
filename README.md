@@ -19,12 +19,12 @@ All workflow files live under `snakemake/`. Run Snakemake from that directory. R
 ## Quick start
 
 ```bash
-git clone <repository-url> impuT2T_workflow
-cd impuT2T_workflow
+git clone https://github.com/maojanlin/ImpuT2T.git
+cd ImpuT2T
 # Download reference data into database/ (see below)
 cd snakemake
 # Edit config.yaml (query FASTA paths) and run
-snakemake -n --configfile config.yaml
+snakemake --dry-run --configfile config.yaml
 ```
 
 ## Dependencies
@@ -65,10 +65,10 @@ snakemake -j 48 --use-conda --configfile config.yaml
 
 ## Reference data
 
-After cloning the repository, download reference files into `database/` at the repo root. The subfolders `high_quality_set/`, `chr_agc/`, and `chr_split/` are included in git as empty placeholders; downloaded files are gitignored. Paths in `snakemake/config.yaml` use `../database/`.
+After cloning the repository, download reference files into `database/` at the repo root. The subfolders `high_quality_set/`, `chr_agc/`, and `chr_split/` are included in git as empty placeholders. Paths in `snakemake/config.yaml` use `../database/`.
 
 ```
-ImpuT2T/          # git clone root
+ImpuT2T/                   # git clone root
   database/                # you download references here
     human472.agc
     high_quality_set/      # full-genome FASTAs → small_pan
@@ -119,7 +119,7 @@ do
 done
 ```
 
-`config.yaml` points `small_pan` at `../database/high_quality_set/*.fa`. Remove CN1 or other entries from both the config and the extract loop if you do not need them.
+`config.yaml` points `small_pan` at `../database/high_quality_set/*.fa`.
 
 ### 2. Chromosome-partitioned HPRC v2 pangenome (patching)
 
@@ -136,7 +136,7 @@ database/chr_split/
     ...
 ```
 
-Donor IDs must match `pangenome_names` in the config and `SAMPLE_LIST_FILE` in `snakefile`. Not every donor has every chromosome (chrX, chrY, chrM may be partial); missing files are skipped automatically.
+Donor IDs should match `pangenome_names` in the config and `SAMPLE_LIST_FILE` in `snakefile`. Not every donor has every chromosome (chrX, chrY, chrM may be partial); missing files are skipped automatically.
 
 ### Download (chromosome-partitioned AGC archives)
 
@@ -158,6 +158,7 @@ for chr in $(seq 1 22 | sed 's/^/chr/') chrX chrY chrM; do
 done
 ```
 
+<!-->
 Or with AWS CLI:
 
 ```bash
@@ -167,6 +168,7 @@ for chr in $(seq 1 22 | sed 's/^/chr/') chrX chrY chrM; do
     "database/chr_agc/pangenome_${chr}.agc"
 done
 ```
+-->
 
 **2. Extract donors** into `database/chr_split/` with [AGC](https://github.com/refresh-bio/agc) (`conda install -c bioconda agc`). Sample names inside each archive match `pangenome_names` (e.g. `CHM13`, `HG002.1`):
 
@@ -175,14 +177,16 @@ done
 database/extract_chr_pangenome.sh
 
 # Or pass a donor list (one ID per line, same as SAMPLE_LIST_FILE)
-database/extract_chr_pangenome.sh snakemake/subsample_lists/sample_id.POP-200.log
+database/extract_chr_pangenome.sh snakemake/subsample_lists/sample_id.POP-10.log
 ```
 
+<!-->
 Manual single-donor example:
 
 ```bash
 agc getset database/chr_agc/pangenome_chr1.agc CHM13 > database/chr_split/chr1/CHM13.fasta
 ```
+-->
 
 ## Configuration
 
@@ -193,19 +197,21 @@ cd snakemake
 cp config.yaml config.my_run.yaml
 ```
 
-Larger pre-built configs (full HPRC panel, 200-donor subsamples, etc.) are also in `snakemake/`: `config.HG002.yaml`, `config.CN1.200.yaml`, `config.CN1.50.yaml`, `config.PAN027.yaml`, …
+Larger pre-built configs (full HPRC panel, 10-donor subsamples, etc.) are also in `snakemake/`: `config.yaml`, `config.CN1.10.yaml`, …
 
 ### Keys to change
 
+**Required for every run:** `queries`, `target_chromosomes`, and `sample` (bold below). Other keys can stay at defaults if you use the full panel setup and standard database layout.
+
 | Key | Description |
 |-----|-------------|
-| `queries` | `[haplotype_name, path/to/query.asm.fa]` — replace `path/to/query.hap*.fa` |
+| **`queries`** | `[haplotype_name, path/to/query.asm.fa]` — replace `path/to/query.hap*.fa` |
 | `small_pan` | `[name, path/to/reference.fa]` — default: `../database/high_quality_set/` |
 | `small_pan_prefixes` | AGP ID prefixes matching `small_pan` entries |
-| `target_chromosomes` | Per-haplotype chromosome lists (autosomes ± X/Y/M) |
+| **`target_chromosomes`** | Lists of chromosomes for each haplotype (autosomes ± X/Y/M). For example, a maternal haplotype should exclude chrY from its list. |
 | `pangenome_path` | Root of chromosome-split donors — default: `../database/chr_split` |
-| `pangenome_names` | Donor IDs (should match `SAMPLE_LIST_FILE` and files under `pangenome_path`) |
-| `sample` | Sample label used in output paths |
+| `pangenome_names` | Donor IDs (should match `SAMPLE_LIST_FILE` and files under `pangenome_path`; change together when using a different subsample) |
+| **`sample`** | Sample label used in output paths |
 | `output_dir` | Directory for all run artifacts (under `snakemake/`) |
 | `threads` | Total cores for Snakemake |
 | `ragtag_threads` | Threads per RagTag job (max 3) |
@@ -221,7 +227,9 @@ RUN_TAG = "run0"
 SAMPLE_LIST_FILE = "subsample_lists/sample_id.log"
 ```
 
-`SAMPLE_LIST_FILE` is one donor ID per line and must agree with `pangenome_names`. Pre-made lists are in `snakemake/subsample_lists/` (`POP-5`, `POP-10`, `POP-50`, `POP-200`, `EUR-*`, `AFR-*`, …). For a larger panel, switch both `pangenome_names` and `SAMPLE_LIST_FILE` together (e.g. use `config.CN1.200.yaml` + `sample_id.POP-200.log` as a reference).
+`SAMPLE_LIST_FILE` should contain one donor ID per line and should match the `pangenome_names` list. You can find pre-made sample ID lists in `snakemake/subsample_lists/` (for example, the `POP-10` subsample). The file `sample_id.log` contains the full donor panel. 
+
+When switching to a different donor panel or subsample, always update both `pangenome_names` and `SAMPLE_LIST_FILE` together—e.g., use `config.yaml` + `sample_id.log` for the full panel. If you want to experiment with different subsets, you can keep the full panel in `config.yaml` and swap out `sample_id.log` to match your chosen subset, setting a different `RUN_TAG` for each run to keep outputs separate.
 
 ## Running
 
@@ -232,7 +240,7 @@ cd snakemake
 snakemake --dry-run --configfile config.yaml
 
 # Full run (RagTag already on PATH)
-snakemake  --cores 48 --keep-going --latency-wait 120 --configfile config.yaml
+snakemake  --cores 48 --keep-going --rerun-incomplete --latency-wait 120 --configfile config.yaml
 ```
 
 For large pangenomes, the workflow runs in **nested** mode (one child Snakemake per chromosome). To limit concurrent chromosome jobs, add `--resources nested_workflow=2` to either command above.
@@ -241,12 +249,24 @@ For large pangenomes, the workflow runs in **nested** mode (one child Snakemake 
 
 ## Outputs
 
+### Main results
+
+These three files under `{output_dir}/final_genome/` are the primary deliverables:
+
+| Path | Description |
+|------|-------------|
+| `{sample}.aggregate.patch.filtered.{RUN_TAG}.fasta` | Patched diploid genome (all chromosomes merged) |
+| `{sample}.aggregate.patch.filtered.{RUN_TAG}.agp` | AGP for the merged genome |
+| `{sample}.aggregate.patch.filtered.{RUN_TAG}.edge.log` | Junction edge log: inter-contig connections, junction scores, logistic-regression probabilities, and used/unused flags |
+
+### Intermediate files
+
 | Path | Description |
 |------|-------------|
 | `{output_dir}/impuT2T_patch/{RUN_TAG}/*.aggregate.patch.filtered.fasta` | Per-chromosome filtered patched sequences |
-| `{output_dir}/final_genome/{sample}.aggregate.patch.filtered.{RUN_TAG}.fasta` | Merged genome across chromosomes |
-| `{output_dir}/final_genome/{sample}.aggregate.patch.filtered.{RUN_TAG}.agp` | Merged AGP |
-| `{output_dir}/ragtag_output/`, `consensus_scaffold/`, `contigs_assignment/` | Intermediate prepare-stage outputs |
+| `{output_dir}/impuT2T_patch/{RUN_TAG}/*.aggregate.edge.log` | Per-chromosome edge log (pre-filter) |
+| `{output_dir}/impuT2T_patch/{RUN_TAG}/*.aggregate.patch.filtered.edge.log` | Per-chromosome edge log after post-patch quality filter |
+| `{output_dir}/ragtag_output/`, `consensus_scaffold/`, `contigs_assignment/` | Prepare-stage outputs |
 
 Logs and benchmarks are written under `{output_dir}/logs/` and `{output_dir}/benchmarks/`.
 

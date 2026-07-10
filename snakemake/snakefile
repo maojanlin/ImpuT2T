@@ -1,17 +1,17 @@
 # impuT2T Snakemake workflow (master entry point)
 #
 # Usage:
-#   snakemake -j 48 --configfile config.yaml
+#   snakemake -j 48 --configfile config.yaml          # full panel
+#   snakemake -j 48 --configfile config.POP-10.yaml   # smoke test
 #
 # Workflow mode (auto):
 #   flat   — single process when 2 * n_donors * n_chr_pairs < heavy_jobs_flat_threshold (default 6000)
 #   nested — per-chromosome child Snakemake runs for larger pangenomes
+#
+# run_tag and sample_list_file are set in the config YAML (not here), so switching
+# between test and production is only --configfile.
 
 configfile: "config.yaml"
-# Keep in sync with configfile above, or pass --configfile on the CLI (see ACTIVE_CONFIGFILE below).
-RUN_TAG = "run0"
-SAMPLE_LIST_FILE = "subsample_lists/sample_id.log"
-#SAMPLE_LIST_FILE = "subsample_lists/sample_id.POP-10.log"
 
 include: "workflow/common.smk"
 

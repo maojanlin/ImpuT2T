@@ -55,9 +55,20 @@ def pangenome_names_for(chromosome):
     ]
 
 
+# run_tag / sample_list_file live in the YAML so switching panels is --configfile only.
+# Child jobs still pass them via --config (overrides YAML for that invocation).
+if "run_tag" not in config:
+    raise KeyError(
+        "config must set run_tag (e.g. in config.yaml or config.POP-10.yaml)"
+    )
+if "sample_list_file" not in config:
+    raise KeyError(
+        "config must set sample_list_file (path relative to snakemake/)"
+    )
+RUN_TAG = config["run_tag"]
+SAMPLE_LIST_FILE = config["sample_list_file"]
+
 if CHILD_MODE:
-    RUN_TAG = config["run_tag"]
-    SAMPLE_LIST_FILE = config["sample_list_file"]
     QUERY_CHROMOSOME_PAIRS = [(config["query_name"], config["chromosome"])]
     PANGENOME_NAMES = pangenome_names_for(config["chromosome"])
     skipped = len(ALL_PANGENOME_NAMES) - len(PANGENOME_NAMES)
@@ -96,7 +107,7 @@ def final_genome_fasta():
     return f"{OUT}/final_genome/{SAMPLE}.aggregate.patch.filtered.{RUN_TAG}.fasta"
 
 
-# Only computed on master (after RUN_TAG is defined in snakefile).
+# Only computed on master (after RUN_TAG / SAMPLE_LIST_FILE from config).
 if not CHILD_MODE:
     TOTAL_HEAVY_JOBS = 2 * len(PANGENOME_NAMES) * len(QUERY_CHROMOSOME_PAIRS)
     WORKFLOW_MODE = "flat" if TOTAL_HEAVY_JOBS < FLAT_THRESHOLD else "nested"

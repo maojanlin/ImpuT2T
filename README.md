@@ -22,9 +22,9 @@ All workflow files live under `snakemake/`. Run Snakemake from that directory. R
 git clone https://github.com/maojanlin/ImpuT2T.git
 cd ImpuT2T
 # Download reference data into database/ (see below)
+# Prefer the smoke test first (see Test run), then a full-panel run with config.yaml
 cd snakemake
-# Edit config.yaml (query FASTA paths) and run
-snakemake --dry-run --configfile config.yaml
+snakemake --dry-run --configfile config.POP-10.yaml
 ```
 
 ## Dependencies
@@ -190,18 +190,22 @@ agc getset database/chr_agc/pangenome_chr1.agc CHM13 > database/chr_split/chr1/C
 
 ## Configuration
 
-The sample config is `snakemake/config.yaml`. Edit it in place, or copy it for a new run:
+`run_tag` and `sample_list_file` live in the **config YAML** (not the snakefile). Switching between a smoke test and a full-panel run is only a different `--configfile` — no snakefile edits.
+
+| Config | Purpose |
+|--------|---------|
+| `config.yaml` | Full HPRC panel; set your own `queries` / `sample` |
+| `config.POP-10.yaml` | Smoke test: POP-10 donors + shipped CN1 contig subsets |
 
 ```bash
 cd snakemake
-cp config.yaml config.my_run.yaml
+cp config.yaml config.my_run.yaml   # optional: personalize a full-panel run
 ```
 
-Larger pre-built configs (full HPRC panel, 10-donor subsamples, etc.) are also in `snakemake/`: `config.yaml`, `config.CN1.10.yaml`, …
 
 ### Keys to change
 
-**Required for every run:** `queries`, `target_chromosomes`, and `sample` (bold below). Other keys can stay at defaults if you use the full panel setup and standard database layout.
+**Required for a production run:** `queries`, `target_chromosomes`, and `sample` (bold below). For the smoke test, `config.POP-10.yaml` already sets these.
 
 | Key | Description |
 |-----|-------------|
@@ -210,37 +214,61 @@ Larger pre-built configs (full HPRC panel, 10-donor subsamples, etc.) are also i
 | `small_pan_prefixes` | AGP ID prefixes matching `small_pan` entries |
 | **`target_chromosomes`** | Lists of chromosomes for each haplotype (autosomes ± X/Y/M). For example, a maternal haplotype should exclude chrY from its list. |
 | `pangenome_path` | Root of chromosome-split donors — default: `../database/chr_split` |
-| `pangenome_names` | Donor IDs (should match `SAMPLE_LIST_FILE` and files under `pangenome_path`; change together when using a different subsample) |
+| `pangenome_names` | Donor IDs (should match `sample_list_file` and files under `pangenome_path`) |
 | **`sample`** | Sample label used in output paths |
+| `run_tag` | Tag for patch / final output paths (e.g. `run0`, `test-POP-10`) |
+| `sample_list_file` | Donor list under `subsample_lists/` (one ID per line) |
 | `output_dir` | Directory for all run artifacts (under `snakemake/`) |
 | `threads` | Total cores for Snakemake |
 | `ragtag_threads` | Threads per RagTag job (max 3) |
 | `heavy_jobs_flat_threshold` | Auto flat vs nested mode (default `6000`) |
 
-### Edit `snakemake/snakefile`
+When changing the donor panel, update **`pangenome_names`** and **`sample_list_file`** together (and use a new `run_tag` / `output_dir` so outputs do not collide).
 
-These values are not in the YAML; defaults in the shipped `snakefile` match `config.yaml`:
+## Test run (POP-10)
 
-```python
-configfile: "config.yaml"
-RUN_TAG = "run0"
-SAMPLE_LIST_FILE = "subsample_lists/sample_id.log"
+Use this before a full-panel run. It exercises the whole pipeline on two chromosomes and 10 donors (flat mode).
+
+**Shipped query data** (`testdata/`, ~6.4 Mb total):
+
+| File | Contigs |
+|------|---------|
+| `CN1.hap1.chr20.contigs.fa` | 4 contigs (partial chr20), ~1.5 Mb |
+| `CN1.hap2.chr22.contigs.fa` | 3 contigs (partial chr22), ~5.0 Mb |
+
+**1. Extract only POP-10 donors** (after downloading `database/chr_agc/`):
+
+```bash
+# From the repository root
+database/extract_chr_pangenome.sh snakemake/subsample_lists/sample_id.POP-10.log
 ```
 
-`SAMPLE_LIST_FILE` should contain one donor ID per line and should match the `pangenome_names` list. You can find pre-made sample ID lists in `snakemake/subsample_lists/` (for example, the `POP-10` subsample). The file `sample_id.log` contains the full donor panel. 
+Also ensure `database/high_quality_set/` is populated (RagTag references; see above).
 
-When switching to a different donor panel or subsample, always update both `pangenome_names` and `SAMPLE_LIST_FILE` together—e.g., use `config.yaml` + `sample_id.log` for the full panel. If you want to experiment with different subsets, you can keep the full panel in `config.yaml` and swap out `sample_id.log` to match your chosen subset, setting a different `RUN_TAG` for each run to keep outputs separate.
+**2. Dry run and execute** (no snakefile changes):
+
+```bash
+cd snakemake
+snakemake --dry-run --configfile config.POP-10.yaml
+snakemake --cores 48 --keep-going --rerun-incomplete --latency-wait 120 \
+  --configfile config.POP-10.yaml
+```
+
+**3. Check results** under `snakemake/output_test/final_genome/` (`CN1-test.aggregate.patch.filtered.test-POP-10.*`).
+
+When the smoke test succeeds, switch to a full-panel config (edit `queries` / `sample` in `config.yaml` or a copy), extract the full donor list into `chr_split/`, and run with `--configfile config.yaml`.
 
 ## Running
 
 ```bash
 cd snakemake
 
-# Dry run
+# Dry run (full panel — after editing queries in config.yaml)
 snakemake --dry-run --configfile config.yaml
 
 # Full run (RagTag already on PATH)
-snakemake  --cores 48 --keep-going --rerun-incomplete --latency-wait 120 --configfile config.yaml
+snakemake --cores 48 --keep-going --rerun-incomplete --latency-wait 120 \
+  --configfile config.yaml
 ```
 
 For large pangenomes, the workflow runs in **nested** mode (one child Snakemake per chromosome). To limit concurrent chromosome jobs, add `--resources nested_workflow=2` to either command above.

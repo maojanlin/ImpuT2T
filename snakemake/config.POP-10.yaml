@@ -1,0 +1,57 @@
+# Smoke-test config: POP-10 donors + small CN1 contig subsets.
+#
+# No snakefile edits required — switch with:
+#   snakemake --cores 48 --configfile config.POP-10.yaml ...
+#
+# Prerequisites:
+#   1. database/high_quality_set/ extracted (see README)
+#   2. POP-10 donors extracted into database/chr_split/:
+#        database/extract_chr_pangenome.sh snakemake/subsample_lists/sample_id.POP-10.log
+#   3. testdata/ FASTAs present (shipped with the repo)
+
+# --- RagTag scaffolding references ---
+small_pan: [
+        [ "CHM13",    "../database/high_quality_set/100000_CHM13.pri.fa" ],
+        [ "GRCh38",   "../database/high_quality_set/110000_GRCh38.pri.fa" ],
+        [ "CN1.1",    "../database/high_quality_set/120001_CN1.pat.fa" ],
+        [ "CN1.2",    "../database/high_quality_set/120002_CN1.mat.fa" ],
+        [ "YAO.1",    "../database/high_quality_set/120003_YAO.pat.fa" ],
+        [ "YAO.2",    "../database/high_quality_set/120004_YAO.mat.fa" ],
+        [ "KSA001.1", "../database/high_quality_set/120005_KSA001.pat.fa" ],
+        [ "KSA001.2", "../database/high_quality_set/120006_KSA001.mat.fa" ],
+        [ "HG002.1",  "../database/high_quality_set/200001_HG002.pat.fa" ],
+        [ "HG002.2",  "../database/high_quality_set/200002_HG002.mat.fa" ],
+]
+
+small_pan_prefixes: [
+    [ "CHM13",    "CHM13#0#" ],
+    [ "GRCh38",   "GRCh38#0#" ],
+    [ "CN1.1",    "CN1#1#" ],
+    [ "CN1.2",    "CN1#2#" ],
+    [ "YAO.1",    "YAO#1#GWHDOOG" ],
+    [ "YAO.2",    "YAO#2#GWHDQZJ" ],
+    [ "KSA001.1", "KSA001#1#" ],
+    [ "KSA001.2", "KSA001#2#" ],
+    [ "HG002.1",  "HG002#1#" ],
+    [ "HG002.2",  "HG002#2#" ],
+]
+
+# One chromosome per haplotype keeps the smoke test small.
+target_chromosomes:
+  - ["chr20"]
+  - ["chr22"]
+
+queries:
+  - ["hap1", "../testdata/CN1.hap1.chr20.contigs.fa"]
+  - ["hap2", "../testdata/CN1.hap2.chr22.contigs.fa"]
+
+sample: "CN1-test"
+output_dir: output_test
+run_tag: "test-POP-10"
+sample_list_file: "subsample_lists/sample_id.POP-10.log"
+heavy_jobs_flat_threshold: 6000
+threads: 48
+ragtag_threads: 3
+
+pangenome_names: ["CHM13", "GRCh38", "HG01106.2", "HG02135.2", "HG04184.1", "NA20809.2", "NA21309.2", "HG02300.1", "NA18974.2", "HG04160.1"]
+pangenome_path: "../database/chr_split"

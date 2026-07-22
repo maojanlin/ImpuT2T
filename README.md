@@ -28,23 +28,22 @@ Install notes and environment tips are in the [Wiki → Dependencies](https://gi
 ```bash
 git clone https://github.com/maojanlin/ImpuT2T.git
 cd ImpuT2T
-
 # Smoke-test refs only (POP-10, chr20 + chr22) — for the quick test below:
-database/setup_database.sh --test
+bash database/setup_database.sh --test
 
 # Or full panel (all chromosomes + donors) — for real runs:
-database/setup_database.sh
+bash database/setup_database.sh
 
 ```
 
 ### 2. Set path parameters
 
-Edit `snakemake/config.yaml` (or use the shipped `config.POP-10.yaml` for the smoke test). The main path entries:
+Edit `snakemake/config.yaml` (or use `config.POP-10.yaml` for the smoke test). The main path entries:
 
 | Parameter | Meaning |
 |-----------|---------|
-| **`queries`** | Paths to your diploid haplotype assemblies (typically two FASTAs: maternal and paternal). Each file is scaffolded with RagTag, then patched. |
-| **`target_chromosomes`** | Which chromosomes to process (e.g. `["chr1", …, "chr22", "chrX"]`). Smoke test uses `["chr20", "chr22"]`. |
+| **`queries`** | Paths to your diploid haplotype assemblies (typically two FASTAs: maternal and paternal). Each file is first attributed to corresponding chromosome with RagTag, then patched. |
+| **`target_chromosomes`** | Which chromosomes to process (e.g. `["chr1", …, "chr22", "chrX"]` or `["chr1", …, "chr22", "chrY"]`). Smoke test uses `["chr20", "chr22"]`. |
 | **`sample`** | Sample / run label used in output filenames under `output/` (e.g. `CN1`, `CN1-test`). |
 
 `config.POP-10.yaml` already points at `testdata/` and `database/` — no edits needed for the smoke test. More options: [Wiki → Configuration](https://github.com/maojanlin/ImpuT2T/wiki/Configuration).

@@ -1,21 +1,15 @@
-# Reference database (local download)
+# Reference database
 
-The subfolders below are tracked in git as empty placeholders. After cloning, download and extract reference data here (see the [main README](../README.md)).
+Empty folders `high_quality_set/`, `chr_agc/`, and `chr_split/` are tracked as placeholders.
+Downloads are gitignored.
 
-```
-database/
-  human472.agc              # Zenodo AGC archive → extract to high_quality_set/
-  high_quality_set/         # full-genome FASTAs for RagTag (small_pan)
-  chr_agc/                  # Index-zone per-chromosome archives (pangenome_chr*.agc)
-  chr_split/                # per-donor per-chromosome FASTAs for patching (pangenome_path)
-    chr1/
-      CHM13.fasta
-      ...
+**Recommended:** from the repository root, run:
+
+```bash
+database/setup_database.sh              # smoke test (POP-10, chr20 + chr22)
+database/setup_database.sh --full       # full panel
 ```
 
-Index zone AGC URLs: `https://genome-idx.s3.amazonaws.com/agc/hprc2/pangenome_<chr>.agc`  
-(chr1–chr22, chrX, chrY, chrM — 25 files)
-
-Extract chr_split FASTAs: `database/extract_chr_pangenome.sh [donor_list]`
-
-Paths in `snakemake/config.yaml` point here via `../database/`.
+This downloads Zenodo `human472.agc` and Index-zone `pangenome_chr*.agc`, then calls
+`extract_chr_pangenome.sh`. See the [Wiki → Reference data](https://github.com/maojanlin/ImpuT2T/wiki/Reference-data)
+or `docs/Reference-data.md`.

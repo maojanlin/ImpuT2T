@@ -4,10 +4,8 @@
 #   snakemake --cores 48 --configfile config.POP-10.yaml ...
 #
 # Prerequisites:
-#   1. database/high_quality_set/ extracted (see README)
-#   2. POP-10 donors extracted into database/chr_split/:
-#        database/extract_chr_pangenome.sh snakemake/subsample_lists/sample_id.POP-10.log
-#   3. testdata/ FASTAs present (shipped with the repo)
+#   database/setup_database.sh   # from repo root (POP-10 + chr20/chr22)
+#   testdata/ FASTAs are shipped with the repo
 
 # --- RagTag scaffolding references ---
 small_pan: [

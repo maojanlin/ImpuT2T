@@ -1,0 +1,15 @@
+# User-downloaded reference data (see database/README.md)
+database/human472.agc
+database/high_quality_set/*
+!database/high_quality_set/.gitkeep
+database/chr_agc/*
+!database/chr_agc/.gitkeep
+database/chr_split/*
+!database/chr_split/.gitkeep
+
+# Snakemake run outputs
+snakemake/output/
+snakemake/output_*/
+
+# FASTA indexes (regenerate with samtools faidx)
+testdata/*.fai

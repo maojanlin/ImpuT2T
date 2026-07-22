@@ -3,7 +3,7 @@
 ## Smoke test (recommended first)
 
 ```bash
-database/setup_database.sh
+database/setup_database.sh --test
 cd snakemake
 snakemake --cores 48 --keep-going --rerun-incomplete --latency-wait 120 \
   --configfile config.POP-10.yaml
@@ -14,7 +14,7 @@ Shipped queries: `testdata/CN1.hap1.chr20.contigs.fa` and `testdata/CN1.hap2.chr
 ## Full panel
 
 ```bash
-database/setup_database.sh --full
+database/setup_database.sh
 # edit snakemake/config.yaml (queries, sample, …)
 cd snakemake
 snakemake --cores 48 --keep-going --rerun-incomplete --latency-wait 120 \

@@ -16,8 +16,8 @@ ImpuT2T/
 
 ```bash
 # From repository root
-database/setup_database.sh              # smoke: POP-10, chr20 + chr22 only
-database/setup_database.sh --full       # all chromosomes + full donor panel
+database/setup_database.sh              # full panel (all chromosomes + donors)
+database/setup_database.sh --test       # smoke: POP-10, chr20 + chr22 only
 ```
 
 The script:

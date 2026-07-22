@@ -29,7 +29,7 @@ git clone https://github.com/maojanlin/ImpuT2T.wiki.git
 ```bash
 git clone https://github.com/maojanlin/ImpuT2T.git
 cd ImpuT2T
-database/setup_database.sh
+database/setup_database.sh --test
 cd snakemake
 snakemake --cores 48 --keep-going --rerun-incomplete --latency-wait 120 \
   --configfile config.POP-10.yaml

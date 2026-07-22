@@ -2,8 +2,8 @@
 # Download and extract ImpuT2T reference data into database/.
 #
 # Usage (from repository root):
-#   database/setup_database.sh              # smoke-test refs (POP-10, chr20+chr22 only)
-#   database/setup_database.sh --full       # all chromosomes + full donor panel
+#   database/setup_database.sh              # full panel (all chromosomes + donors)
+#   database/setup_database.sh --test       # smoke-test refs (POP-10, chr20+chr22)
 #   database/setup_database.sh --help
 #
 # Requires: wget (or curl), agc (bioconda: conda install -c bioconda agc)
@@ -20,9 +20,11 @@ EXTRACT_SCRIPT="${DB}/extract_chr_pangenome.sh"
 ZENODO_AGC_URL="https://zenodo.org/records/14854401/files/human472.agc?download=1"
 HPRC2_AGC_BASE="https://genome-idx.s3.amazonaws.com/agc/hprc2"
 
-MODE="smoke"   # smoke | full
-DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.POP-10.log"
-CHROMS=(chr20 chr22)
+MODE="full"   # full | test
+DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.log"
+CHROMS=()
+for i in $(seq 1 22); do CHROMS+=("chr${i}"); done
+CHROMS+=("chrX" "chrY" "chrM")
 
 usage() {
   cat <<'EOF'
@@ -32,9 +34,9 @@ Usage:
   database/setup_database.sh [options]
 
 Options:
-  --smoke   Smoke-test data (default): human472 small_pan + POP-10 donors
-            for chr20 and chr22 only (matches config.POP-10.yaml).
-  --full    Full panel: all chromosomes (chr1–22,X,Y,M) + sample_id.log donors.
+  (default) Full extraction: all chromosomes (chr1–22,X,Y,M) + sample_id.log donors.
+  --test    Smoke-test data: human472 small_pan + POP-10 donors for chr20 and
+            chr22 only (matches config.POP-10.yaml).
   --donor-list PATH
             Override donor list for chr_split extraction.
   -h, --help
@@ -42,14 +44,20 @@ Options:
 
 Examples:
   database/setup_database.sh
-  database/setup_database.sh --full
+  database/setup_database.sh --test
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --smoke) MODE="smoke"; shift ;;
+    --test|--smoke)
+      MODE="test"
+      DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.POP-10.log"
+      CHROMS=(chr20 chr22)
+      shift
+      ;;
     --full)
+      # Kept for compatibility; same as default.
       MODE="full"
       DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.log"
       CHROMS=()
@@ -69,10 +77,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ "$MODE" == "smoke" ]]; then
-  DONOR_LIST="${DONOR_LIST:-${REPO_ROOT}/snakemake/subsample_lists/sample_id.POP-10.log}"
-fi
 
 download() {
   local url="$1"
@@ -149,8 +153,7 @@ if [[ ! -x "$EXTRACT_SCRIPT" ]]; then
   chmod +x "$EXTRACT_SCRIPT" || true
 fi
 
-# Restrict extraction to chromosomes we downloaded when in smoke mode.
-# extract_chr_pangenome.sh already skips missing AGC files.
+# extract_chr_pangenome.sh skips missing AGC files, so --test only extracts chr20/chr22.
 "$EXTRACT_SCRIPT" "$DONOR_LIST"
 
 echo ""
@@ -159,7 +162,7 @@ echo "  high_quality_set: ${HQ}"
 echo "  chr_agc:          ${CHR_AGC} ($(printf '%s ' "${CHROMS[@]}"))"
 echo "  chr_split:        ${CHR_SPLIT}"
 echo "  donor list:       ${DONOR_LIST}"
-if [[ "$MODE" == "smoke" ]]; then
+if [[ "$MODE" == "test" ]]; then
   echo ""
   echo "Next: cd snakemake && snakemake --cores 48 --configfile config.POP-10.yaml"
 else

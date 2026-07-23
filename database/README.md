@@ -6,8 +6,8 @@ Downloads are gitignored.
 **Recommended:** from the repository root, run:
 
 ```bash
-database/setup_database.sh              # full panel (all chromosomes + donors)
-database/setup_database.sh --test       # smoke test (POP-10, chr20 + chr22)
+database/setup_database.sh              # full panel (download + extract all)
+database/setup_database.sh --test       # smoke test (download + extract POP-10, chr20 + chr22)
 ```
 
 This downloads Zenodo `human472.agc` and Index-zone `pangenome_chr*.agc`, then calls

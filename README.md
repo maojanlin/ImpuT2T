@@ -28,10 +28,10 @@ Install notes and environment tips are in the [Wiki → Dependencies](https://gi
 ```bash
 git clone https://github.com/maojanlin/ImpuT2T.git
 cd ImpuT2T
-# Smoke-test refs only (POP-10, chr20 + chr22) — for the quick test below:
+# Smoke-test: download all chromosome AGCs; extract POP-10 donors for chr20 + chr22:
 bash database/setup_database.sh --test
 
-# Or full panel (all chromosomes + donors) — for real runs:
+# Or full panel (download + extract all chromosomes + donors) — for real runs:
 bash database/setup_database.sh
 
 ```

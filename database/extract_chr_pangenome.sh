@@ -2,7 +2,10 @@
 # Extract per-donor chromosome FASTAs from Index-zone AGC archives into database/chr_split/.
 #
 # Usage (from repository root):
-#   database/extract_chr_pangenome.sh [donor_list.tsv]
+#   database/extract_chr_pangenome.sh [donor_list.tsv] [chr ...]
+#
+# If no chromosomes are listed after the donor list, extract all of
+# chr1–22,X,Y,M (skipping any chromosome whose AGC is missing).
 #
 # Default donor list: snakemake/subsample_lists/sample_id.POP-10.log
 # Requires: agc (bioconda), archives in database/chr_agc/pangenome_<chr>.agc
@@ -13,10 +16,17 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AGC_DIR="${REPO_ROOT}/database/chr_agc"
 OUT_ROOT="${REPO_ROOT}/database/chr_split"
 DONOR_LIST="${1:-${REPO_ROOT}/snakemake/subsample_lists/sample_id.POP-10.log}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
 
-CHROMS=()
-for i in $(seq 1 22); do CHROMS+=("chr${i}"); done
-CHROMS+=("chrX" "chrY" "chrM")
+if [[ $# -gt 0 ]]; then
+  CHROMS=("$@")
+else
+  CHROMS=()
+  for i in $(seq 1 22); do CHROMS+=("chr${i}"); done
+  CHROMS+=("chrX" "chrY" "chrM")
+fi
 
 if [[ ! -f "$DONOR_LIST" ]]; then
   echo "Donor list not found: $DONOR_LIST" >&2

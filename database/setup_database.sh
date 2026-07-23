@@ -3,7 +3,7 @@
 #
 # Usage (from repository root):
 #   database/setup_database.sh              # full panel (all chromosomes + donors)
-#   database/setup_database.sh --test       # smoke-test refs (POP-10, chr20+chr22)
+#   database/setup_database.sh --test       # smole-test: download AGCs; extract only POP-10 chr20+chr22
 #   database/setup_database.sh --help
 #
 # Requires: wget (or curl), agc (bioconda: conda install -c bioconda agc)
@@ -22,9 +22,12 @@ HPRC2_AGC_BASE="https://genome-idx.s3.amazonaws.com/agc/hprc2"
 
 MODE="full"   # full | test
 DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.log"
+# Chromosomes to download into chr_agc/ (always full panel by default / --test).
 CHROMS=()
 for i in $(seq 1 22); do CHROMS+=("chr${i}"); done
 CHROMS+=("chrX" "chrY" "chrM")
+# Chromosomes to extract into chr_split/ (empty = same as CHROMS).
+EXTRACT_CHROMS=()
 
 usage() {
   cat <<'EOF'
@@ -35,8 +38,8 @@ Usage:
 
 Options:
   (default) Full extraction: all chromosomes (chr1–22,X,Y,M) + sample_id.log donors.
-  --test    Smoke-test data: human472 small_pan + POP-10 donors for chr20 and
-            chr22 only (matches config.POP-10.yaml).
+  --test    Smoke-test data: download all chromosome AGCs, extract
+            POP-10 donors for chr20 and chr22 (matches config.POP-10.yaml).
   --donor-list PATH
             Override donor list for chr_split extraction.
   -h, --help
@@ -53,16 +56,15 @@ while [[ $# -gt 0 ]]; do
     --test|--smoke)
       MODE="test"
       DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.POP-10.log"
-      CHROMS=(chr20 chr22)
+      # Still download the full AGC set; only extract smoke-test chromosomes.
+      EXTRACT_CHROMS=(chr20 chr22)
       shift
       ;;
     --full)
       # Kept for compatibility; same as default.
       MODE="full"
       DONOR_LIST="${REPO_ROOT}/snakemake/subsample_lists/sample_id.log"
-      CHROMS=()
-      for i in $(seq 1 22); do CHROMS+=("chr${i}"); done
-      CHROMS+=("chrX" "chrY" "chrM")
+      EXTRACT_CHROMS=()
       shift
       ;;
     --donor-list)
@@ -153,14 +155,16 @@ if [[ ! -x "$EXTRACT_SCRIPT" ]]; then
   chmod +x "$EXTRACT_SCRIPT" || true
 fi
 
-# extract_chr_pangenome.sh skips missing AGC files, so --test only extracts chr20/chr22.
-"$EXTRACT_SCRIPT" "$DONOR_LIST"
+if [[ ${#EXTRACT_CHROMS[@]} -eq 0 ]]; then
+  EXTRACT_CHROMS=("${CHROMS[@]}")
+fi
+"$EXTRACT_SCRIPT" "$DONOR_LIST" "${EXTRACT_CHROMS[@]}"
 
 echo ""
 echo "=== Done ==="
 echo "  high_quality_set: ${HQ}"
 echo "  chr_agc:          ${CHR_AGC} ($(printf '%s ' "${CHROMS[@]}"))"
-echo "  chr_split:        ${CHR_SPLIT}"
+echo "  chr_split:        ${CHR_SPLIT} (extracted: $(printf '%s ' "${EXTRACT_CHROMS[@]}"))"
 echo "  donor list:       ${DONOR_LIST}"
 if [[ "$MODE" == "test" ]]; then
   echo ""

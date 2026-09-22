@@ -142,6 +142,9 @@ rule impuT2T_patch:
             --tiebreak_manifest {input.tiebreak_manifest} \
             --tiebreak_jobs {threads} \
             --tiebreak_threads 1 \
+            --tiebreak_backend {TIEBREAK_BACKEND} \
+            --tiebreak_cache_mode {TIEBREAK_CACHE_MODE} \
+            --tiebreak_dump_info {TIEBREAK_DUMP_INFO} \
             --timeout 100 --retry_timeout 100  --no_optional_tie_skips  \
             --second_pass --weight_ratio 0.5 >> {log} 2>&1
 

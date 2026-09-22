@@ -41,6 +41,9 @@ rule run_chromosome:
             --latency-wait 60 \
             --config run_tag={RUN_TAG} \
                      sample_list_file={SAMPLE_LIST_FILE} \
+                     tiebreak_backend={TIEBREAK_BACKEND} \
+                     tiebreak_cache_mode={TIEBREAK_CACHE_MODE} \
+                     tiebreak_dump_info={TIEBREAK_DUMP_INFO} \
                      query_name={wildcards.query_name} \
                      chromosome={wildcards.chromosome} \
             -- {params.target}

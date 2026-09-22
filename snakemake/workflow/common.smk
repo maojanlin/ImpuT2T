@@ -120,3 +120,20 @@ if not CHILD_MODE:
         f"chr_threads={CHR_THREADS}",
         file=sys.stderr,
     )
+
+# Tiebreak computation/cache/export settings are independent.
+TIEBREAK_BACKEND = config.get("tiebreak_backend", "targeted")
+TIEBREAK_CACHE_MODE = config.get("tiebreak_cache_mode", "reuse")
+TIEBREAK_DUMP_INFO = config.get("tiebreak_dump_info", "off")
+# YAML 1.1 parses unquoted on/off as booleans.
+if isinstance(TIEBREAK_DUMP_INFO, bool):
+    TIEBREAK_DUMP_INFO = "on" if TIEBREAK_DUMP_INFO else "off"
+for key, value, choices in (
+    ("tiebreak_backend", TIEBREAK_BACKEND, ("targeted", "legacy")),
+    ("tiebreak_cache_mode", TIEBREAK_CACHE_MODE, ("reuse", "refresh", "only")),
+    ("tiebreak_dump_info", TIEBREAK_DUMP_INFO, ("off", "on")),
+):
+    if value not in choices:
+        raise ValueError(f"{key} must be one of {choices}; got {value!r}")
+if TIEBREAK_BACKEND == "legacy" and TIEBREAK_CACHE_MODE == "only":
+    raise ValueError("tiebreak_cache_mode only requires tiebreak_backend targeted")

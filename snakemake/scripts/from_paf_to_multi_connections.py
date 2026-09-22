@@ -780,6 +780,18 @@ def write_terminal_fasta(input_fasta, output_fasta,  dict_head_end_range, dict_t
         subseq = seq[start:end]
         out_f.write(f">{header}_{suffix} {start}-{end}\n{subseq}\n")
 
+    if os.path.isfile(input_fasta + ".fai"):
+        with pysam.FastaFile(input_fasta) as fasta, open(output_fasta, "w") as out_f:
+            for header in fasta.references:
+                length = fasta.get_reference_length(header)
+                for suffix, ranges in (("head", dict_head_end_range), ("tail", dict_tail_end_range)):
+                    if header in ranges:
+                        start, end = ranges[header]
+                        lo, hi, _ = slice(start, end).indices(length)
+                        subseq = fasta.fetch(header, lo, max(lo, hi))
+                        out_f.write(f">{header}_{suffix} {start}-{end}\n{subseq}\n")
+        return
+
     with open(input_fasta, "r") as in_f, open(output_fasta, "w") as out_f:
         header = None
         seq_lines = []
@@ -952,55 +964,32 @@ def generate_relevant_fasta(components_fn, reference_fn, output_path):
     subprocess.run(cmd, shell=True, check=True)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Combine, filter full-length and terminal PAF alignments and build scaffold graph')
-    parser.add_argument('-fl', '--full_length', required=True, help='Full length alignment PAF file')
-    parser.add_argument('-q', '--query', required=True, help='Query FASTA file')
-    parser.add_argument('-r', '--reference', required=True, help='Reference FASTA file for terminal alignment')
-    parser.add_argument('-o', '--output', help='Output scaffold graph report file')
-    parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads [1]')
-    parser.add_argument('--terminal_ratio', type=float, default=0.05, help='Terminal ratio [0.05]')
-    parser.add_argument('--map_length', type=int, default=5000, help='Map length [5000]')
-    parser.add_argument('--min_contig_length', type=int, default=10000, help='Minimum contig length [10000]')
-    parser.add_argument('--max_min_id_ratio', type=float, default=0.5, help='Maximum minimum identity ratio [0.7]')
-    parser.add_argument('--debug', action='store_true', help='Debug mode')
-    parser.add_argument('--info_only', action='store_true', help='Output only the agp and info files without the patched fasta')
-    parser.add_argument('--connect_mode', choices=['closest', 'longest'], default='closest', help='Connection mode [closest]')
-    parser.add_argument('--blacklist', help='Blacklist file')
-    args = parser.parse_args()
+def build_connection_evidence(full_len_paf, components_fn, reference_fn, output_path,
+                              threads=1, TERMINAL_RATIO=0.05, MAP_LENGTH=5000,
+                              MIN_CONTIG_LENGTH=10000, MAX_MIN_ID_RATIO=0.5,
+                              DEBUG=False, CONNECT_MODE="closest", set_blacklist=None,
+                              requested_pairs=None, minimap2_path="minimap2"):
+    """Shared legacy/targeted scorer; retain complete geometry before filtering edges.
 
-    full_len_paf = args.full_length
-    output_path = args.output
-    components_fn = args.query
-    reference_fn = args.reference
-    threads = args.threads
-    TERMINAL_RATIO = args.terminal_ratio
-    MAP_LENGTH = args.map_length
-    MIN_CONTIG_LENGTH = args.min_contig_length
-    MAX_MIN_ID_RATIO = args.max_min_id_ratio
-    DEBUG = args.debug
-    INFO_ONLY = args.info_only
-    CONNECT_MODE = args.connect_mode
-    BLACKLIST = args.blacklist
-    
-    set_blacklist = set()
-    if BLACKLIST:
-        with open(BLACKLIST, "r") as f:
-            for line in f:
-                line = line.rstrip().split(',')
-                set_blacklist.add((line[0], line[1]))
-                set_blacklist.add((line[1], line[0]))
-    else:
-        set_blacklist = set()
-        
+    Targeted mode returns only requested canonical pairs and extracted window metadata.
+    The caller owns output_path scratch artifacts. Input FASTA files are never indexed here
+    in targeted mode; indexed extraction is used only if an index already exists.
+    """
+    set_blacklist = set_blacklist or set()
     alns_full_len = read_genome_alignments(full_len_paf, True)
 
     alns_selected_full = filter_high_quality_alns(alns_full_len, minimum_length=MIN_CONTIG_LENGTH, length_ratio=TERMINAL_RATIO, max_min_id_ratio=MAX_MIN_ID_RATIO)
     dict_head_end_range, dict_tail_end_range = select_terminals(alns_selected_full, terminal_ratio=TERMINAL_RATIO, map_lenth=MAP_LENGTH)
+    if requested_pairs is not None:
+        endpoints = {node for pair in requested_pairs for node in pair}
+        dict_head_end_range = {k: v for k, v in dict_head_end_range.items() if k + "_b" in endpoints}
+        dict_tail_end_range = {k: v for k, v in dict_tail_end_range.items() if k + "_e" in endpoints}
+    windows = {k + "_b": v for k, v in dict_head_end_range.items()}
+    windows.update({k + "_e": v for k, v in dict_tail_end_range.items()})
     # Generate, align, and parse terminal sequences
 
     print("Processing terminals with minimap2 realignment...")
-    alns_terminal = process_terminals(components_fn, reference_fn, dict_head_end_range, dict_tail_end_range, output_path, threads=threads)
+    alns_terminal = process_terminals(components_fn, reference_fn, dict_head_end_range, dict_tail_end_range, output_path, threads=threads, minimap2_path=minimap2_path) if windows else {}
     terminal_matches = map_terminal_to_full(alns_selected_full, alns_terminal)
     
     ref_alns = reverse_alignments(alns_selected_full)
@@ -1071,7 +1060,8 @@ def main():
                     new_item.append(connection)
             dict_all_connections[key] = new_item
 
-    sg = PatchScaffoldGraph(components_fn)
+    sg = PatchScaffoldGraph(components_fn) if requested_pairs is None else None
+    rows = {}
     if DEBUG:
         print("---------------------------------------------------------------------------------------")
     for key, item in dict_all_connections.items():
@@ -1115,6 +1105,9 @@ def main():
                 print((als.ref_headers[idx_l], als.query_starts[idx_l], als.query_ends[idx_l]))
                 print(l_match, terminal_matches[als.ref_headers[idx_l]][l_match[0]])
                 print(r_match, terminal_matches[als.ref_headers[idx_r]][r_match[0]])
+            pair = tuple(sorted((u, v)))
+            if requested_pairs is not None and pair not in requested_pairs:
+                continue
             left_pair_score = terminal_matches[als.ref_headers[idx_l]][l_match[0]][l_match[1]]
             right_pair_score = terminal_matches[als.ref_headers[idx_r]][r_match[0]][r_match[1]]
             pair_score = left_pair_score + right_pair_score
@@ -1158,12 +1151,65 @@ def main():
                 0,  # Always on the query's forward strand
                 is_gap=False
             )
-            sg.add_edge(u, v, alignment, pair_score, -overlap)
-    if DEBUG:
+            if sg is not None:
+                sg.add_edge(u, v, alignment, pair_score, -overlap)
+            elif pair not in rows or pair_score >= rows[pair][0]:
+                # Match PatchScaffoldGraph.add_edge: highest score, last equal score wins.
+                rows[pair] = (pair_score, -overlap)
+    if DEBUG and sg is not None:
         print("sg.edges", "---------------------------------------------------------------------------------------")
         for u, v in sg.edges:
             print(u, v, sg[u][v]["weight"], sg[u][v]["score"], sg[u][v]["dist"])
     
+    return (sg, rows, windows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Combine, filter full-length and terminal PAF alignments and build scaffold graph')
+    parser.add_argument('-fl', '--full_length', required=True, help='Full length alignment PAF file')
+    parser.add_argument('-q', '--query', required=True, help='Query FASTA file')
+    parser.add_argument('-r', '--reference', required=True, help='Reference FASTA file for terminal alignment')
+    parser.add_argument('-o', '--output', help='Output scaffold graph report file')
+    parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads [1]')
+    parser.add_argument('--terminal_ratio', type=float, default=0.05, help='Terminal ratio [0.05]')
+    parser.add_argument('--map_length', type=int, default=5000, help='Map length [5000]')
+    parser.add_argument('--min_contig_length', type=int, default=10000, help='Minimum contig length [10000]')
+    parser.add_argument('--max_min_id_ratio', type=float, default=0.5, help='Maximum minimum identity ratio [0.7]')
+    parser.add_argument('--debug', action='store_true', help='Debug mode')
+    parser.add_argument('--info_only', action='store_true', help='Output only the agp and info files without the patched fasta')
+    parser.add_argument('--connect_mode', choices=['closest', 'longest'], default='closest', help='Connection mode [closest]')
+    parser.add_argument('--blacklist', help='Blacklist file')
+    args = parser.parse_args()
+
+    full_len_paf = args.full_length
+    output_path = args.output
+    components_fn = args.query
+    reference_fn = args.reference
+    threads = args.threads
+    TERMINAL_RATIO = args.terminal_ratio
+    MAP_LENGTH = args.map_length
+    MIN_CONTIG_LENGTH = args.min_contig_length
+    MAX_MIN_ID_RATIO = args.max_min_id_ratio
+    DEBUG = args.debug
+    INFO_ONLY = args.info_only
+    CONNECT_MODE = args.connect_mode
+    BLACKLIST = args.blacklist
+
+    set_blacklist = set()
+    if BLACKLIST:
+        with open(BLACKLIST, "r") as f:
+            for line in f:
+                line = line.rstrip().split(',')
+                set_blacklist.add((line[0], line[1]))
+                set_blacklist.add((line[1], line[0]))
+    else:
+        set_blacklist = set()
+
+    sg, _, _ = build_connection_evidence(
+        full_len_paf, components_fn, reference_fn, output_path, threads,
+        TERMINAL_RATIO, MAP_LENGTH, MIN_CONTIG_LENGTH, MAX_MIN_ID_RATIO,
+        DEBUG, CONNECT_MODE, set_blacklist)
+
     output_graph_info(sg, output_path + ".info")
     sg.straight_to_agp(output_path+'.agp', components_fn, add_suffix_to_unplaced=False)
     

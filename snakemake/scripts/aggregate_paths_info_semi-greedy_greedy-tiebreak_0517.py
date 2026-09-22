@@ -156,6 +156,9 @@ class TiebreakConfig:
     from_paf_script: str
     sample_inputs: Dict[str, Tuple[str, str, str]]
     reuse: bool
+    backend: str = "targeted"
+    cache_mode: str = "reuse"
+    dump_info: bool = False
 
 
 def _run_tiebreak_sample_worker(args: Tuple[TiebreakConfig, str]) -> Tuple[str, Optional[str]]:
@@ -604,6 +607,8 @@ class EdgeAggregator:
         return os.path.join(self.tiebreak_cfg.tiebreak_dir, sample + ".info")
 
     def _load_tiebreak_lookup_for_sample(self, sample: str) -> None:
+        if self.tiebreak_cfg.backend == "targeted":
+            return
         if sample in self._tiebreak_attempted_samples:
             return
         self._tiebreak_attempted_samples.add(sample)
@@ -739,11 +744,20 @@ class EdgeAggregator:
         if self.tiebreak_cfg is None:
             return
 
-        needed_samples = self._collect_needed_tiebreak_samples(used_pairs_sorted)
-        missing_samples = self._samples_missing_tiebreak_info(needed_samples)
-        self._prefetch_tiebreak_parallel(missing_samples)
-        for sample in sorted(needed_samples):
-            self._load_tiebreak_lookup_for_sample(sample)
+        if self.tiebreak_cfg.backend == "targeted":
+            from targeted_tiebreak import collect_requests, resolve_requests
+            requests = collect_requests(used_pairs_sorted, self.pending_tiebreak)
+            records = resolve_requests(self.tiebreak_cfg, requests)
+            self._tiebreak_lookup = {
+                key: (record["score"], record["distance"])
+                for key, record in records.items() if record["status"] == "scored"
+            }
+        else:
+            needed_samples = self._collect_needed_tiebreak_samples(used_pairs_sorted)
+            missing_samples = self._samples_missing_tiebreak_info(needed_samples)
+            self._prefetch_tiebreak_parallel(missing_samples)
+            for sample in sorted(needed_samples):
+                self._load_tiebreak_lookup_for_sample(sample)
 
         for pair in sorted(used_pairs_sorted):
             if pair in self.pending_skip_tiebreak_log:
@@ -2024,11 +2038,15 @@ def main():
     parser.add_argument(
         "--tiebreak",
         action="store_true",
-        help="After the usual GMM champion logic, if several haplotypes tie (same flank score within the "
-        "winner's GMM distance band, or same fallback key), rerun from_paf_to_multi_connections with "
-        "--tiebreak_map_length when >=2 tied samples have tiebreak/*.info rows; otherwise pick within the "
-        "tie set (argmax score if --choose_max_edge, else same ordering as GMM fallback).",
+        help="Resolve ties on selected path edges using longer terminal alignments, "
+        "with targeted computation and validated cache reuse by default.",
     )
+    parser.add_argument("--tiebreak_backend", choices=["targeted", "legacy"], default="targeted",
+                        help="Tiebreak computation backend [targeted].")
+    parser.add_argument("--tiebreak_cache_mode", choices=["reuse", "refresh", "only"], default="reuse",
+                        help="Targeted cache policy [reuse]; only forbids new alignments.")
+    parser.add_argument("--tiebreak_dump_info", choices=["off", "on"], nargs="?", const="on", default="off",
+                        help="Export targeted .info and evidence tables [off]; flag alone means on.")
     parser.add_argument(
         "--tiebreak_manifest",
         help="TSV per line: sample_id, full_length.paf, query.fa, optional reference.fa (omit 4th if --tiebreak_ref).",
@@ -2067,7 +2085,7 @@ def main():
     parser.add_argument(
         "--tiebreak_no_reuse",
         action="store_true",
-        help="Always rerun tiebreak from_paf even if tiebreak/<sample>.info already exists.",
+        help="Alias for --tiebreak_cache_mode refresh.",
     )
     parser.add_argument(
         "--no_optional_tie_skips",
@@ -2080,6 +2098,15 @@ def main():
 
     if args.tiebreak and not args.tiebreak_manifest:
         parser.error("--tiebreak requires --tiebreak_manifest")
+
+    if args.tiebreak_no_reuse and args.tiebreak_cache_mode == "only":
+        parser.error("--tiebreak_no_reuse conflicts with --tiebreak_cache_mode only")
+    if args.tiebreak_no_reuse:
+        args.tiebreak_cache_mode = "refresh"
+    if args.tiebreak_backend == "legacy" and args.tiebreak_cache_mode == "only":
+        parser.error("cache-only mode requires --tiebreak_backend targeted")
+    if args.tiebreak_map_length < 1 or args.tiebreak_threads < 1 or args.tiebreak_jobs < 1:
+        parser.error("tiebreak map length, threads, and jobs must be positive")
 
     # Collect edges from all samples
     if args.weight == "Conf":
@@ -2127,7 +2154,10 @@ def main():
             jobs=max(1, int(args.tiebreak_jobs)),
             from_paf_script=fp_script,
             sample_inputs=manifest,
-            reuse=not bool(args.tiebreak_no_reuse),
+            reuse=args.tiebreak_cache_mode != "refresh",
+            backend=args.tiebreak_backend,
+            cache_mode=args.tiebreak_cache_mode,
+            dump_info=args.tiebreak_dump_info == "on",
         )
 
     edge_aggregator = EdgeAggregator(

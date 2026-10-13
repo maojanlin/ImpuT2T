@@ -1,4 +1,4 @@
-_Updated: 2026-07-22_
+_Updated: 2026-10-13_
 
 # ImpuT2T
 
@@ -13,13 +13,13 @@ Detailed docs: [Wiki](https://github.com/maojanlin/ImpuT2T/wiki) (or `docs/` in 
 Tools expected on `PATH`:
 
 - **Snakemake** ≥ 7
-- **RagTag** 2.0.1
+- **RagTag** 2.1.0
 - **minimap2**
 - **samtools**
 - **Python 3** with `numpy`, `scikit-learn`, `pysam`
 - **[agc](https://github.com/refresh-bio/agc)** (needed for database setup)
 
-Install notes and environment tips are in the [Wiki → Dependencies](https://github.com/maojanlin/ImpuT2T/wiki/Dependencies).
+For installation instructions, tested system requirements, demo runtime and expected outputs, see [Wiki → Dependencies](https://github.com/maojanlin/ImpuT2T/wiki/Dependencies) and [Wiki → Installation and demo](https://github.com/maojanlin/ImpuT2T/wiki/Installation-and-demo).
 
 ## Quick start
 
